@@ -52,3 +52,11 @@ def toggle_ai(dialog_id: str):
         .execute()
 
     return {"ai_disabled": not current_status}
+
+
+@router.delete("/api/dialogs/{dialog_id}")
+def delete_dialog(dialog_id: str):
+    """Удаляет диалог и все его сообщения."""
+    supabase.table("messages").delete().eq("dialog_id", dialog_id).execute()
+    supabase.table("dialogs").delete().eq("id", dialog_id).execute()
+    return {"status": "deleted"}

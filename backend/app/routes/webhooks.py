@@ -112,6 +112,10 @@ async def telegram_webhook(request: Request):
         if not text:
             return {"status": "empty"}
 
+        # Игнорируем команды Telegram (типа /start)
+        if text.startswith("/"):
+            return {"status": "command_ignored"}
+
         # Находим бота по telegram_token (для MVP — берём первого бота)
         bot_result = supabase.table("bots") \
             .select("*") \
