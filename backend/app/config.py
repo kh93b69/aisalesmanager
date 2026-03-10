@@ -12,6 +12,9 @@ SUPABASE_SERVICE_ROLE_KEY = os.getenv("SUPABASE_SERVICE_ROLE_KEY")
 # Claude API
 ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY")
 
+# Telegram
+TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
+
 # WhatsApp (WAHA)
 WAHA_API_URL = os.getenv("WAHA_API_URL", "http://localhost:3000")
 WAHA_API_KEY = os.getenv("WAHA_API_KEY", "")

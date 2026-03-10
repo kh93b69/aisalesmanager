@@ -3,65 +3,54 @@ from app.database import supabase
 from app.ai_engine import get_ai_response
 from app.rag import search_knowledge
 from app.whatsapp import send_whatsapp_message
+from app.telegram import send_telegram_message, set_webhook
+from app.config import BACKEND_URL
 
 router = APIRouter()
 
 
-@router.post("/webhook/whatsapp")
-async def whatsapp_webhook(request: Request):
+def process_message(bot_id: str, chat_id: str, text: str, channel: str):
     """
-    Принимает входящие сообщения от WhatsApp (через WAHA).
-    Обрабатывает их через ИИ и отправляет ответ обратно.
+    Общая логика обработки входящего сообщения.
+    Работает одинаково для WhatsApp, Telegram и других каналов.
+
+    Возвращает ответ ИИ или None если ИИ отключён.
     """
-    body = await request.json()
-
-    # WAHA отправляет разные типы событий, нам нужны только сообщения
-    if body.get("event") != "message":
-        return {"status": "ignored"}
-
-    message_data = body.get("payload", {})
-    chat_id = message_data.get("from", "")
-    text = message_data.get("body", "")
-    session = body.get("session", "default")
-
-    if not text or not chat_id:
-        return {"status": "empty"}
-
-    # Находим бота по сессии WhatsApp
+    # Находим бота
     bot_result = supabase.table("bots") \
         .select("*") \
-        .eq("whatsapp_session", session) \
+        .eq("id", bot_id) \
         .limit(1) \
         .execute()
 
     if not bot_result.data:
-        return {"status": "bot_not_found"}
+        return None
 
     bot = bot_result.data[0]
 
-    # Проверяем, не отключён ли ИИ для этого диалога (режим "Перехват")
+    # Ищем существующий диалог
     dialog_result = supabase.table("dialogs") \
         .select("*") \
-        .eq("bot_id", bot["id"]) \
+        .eq("bot_id", bot_id) \
         .eq("chat_id", chat_id) \
         .limit(1) \
         .execute()
 
+    # Проверяем режим "Перехват"
     if dialog_result.data and dialog_result.data[0].get("ai_disabled"):
-        # ИИ отключён — просто сохраняем сообщение
         supabase.table("messages").insert({
             "dialog_id": dialog_result.data[0]["id"],
             "role": "user",
             "content": text,
         }).execute()
-        return {"status": "ai_disabled"}
+        return None
 
     # Создаём диалог, если его нет
     if not dialog_result.data:
         new_dialog = supabase.table("dialogs").insert({
-            "bot_id": bot["id"],
+            "bot_id": bot_id,
             "chat_id": chat_id,
-            "channel": "whatsapp",
+            "channel": channel,
         }).execute()
         dialog_id = new_dialog.data[0]["id"]
     else:
@@ -85,7 +74,7 @@ async def whatsapp_webhook(request: Request):
     messages = [{"role": m["role"], "content": m["content"]} for m in history_result.data]
 
     # Ищем релевантный контекст в базе знаний
-    knowledge_context = search_knowledge(bot["id"], text)
+    knowledge_context = search_knowledge(bot_id, text)
 
     # Получаем ответ от ИИ
     ai_response = get_ai_response(
@@ -101,7 +90,87 @@ async def whatsapp_webhook(request: Request):
         "content": ai_response,
     }).execute()
 
-    # Отправляем ответ в WhatsApp
-    await send_whatsapp_message(chat_id, ai_response, session)
+    return ai_response
 
-    return {"status": "ok", "response": ai_response}
+
+# --- Telegram ---
+
+@router.post("/webhook/telegram")
+async def telegram_webhook(request: Request):
+    """Принимает входящие сообщения от Telegram."""
+    body = await request.json()
+
+    # Telegram отправляет объект Update
+    message = body.get("message")
+    if not message:
+        return {"status": "ignored"}
+
+    text = message.get("text", "")
+    chat_id = str(message["chat"]["id"])
+
+    if not text:
+        return {"status": "empty"}
+
+    # Находим бота по telegram_token (для MVP — берём первого бота)
+    bot_result = supabase.table("bots") \
+        .select("*") \
+        .limit(1) \
+        .execute()
+
+    if not bot_result.data:
+        return {"status": "bot_not_found"}
+
+    bot = bot_result.data[0]
+
+    ai_response = process_message(bot["id"], chat_id, text, "telegram")
+
+    if ai_response:
+        await send_telegram_message(int(chat_id), ai_response)
+
+    return {"status": "ok"}
+
+
+@router.post("/api/setup-telegram-webhook")
+async def setup_telegram_webhook():
+    """Устанавливает webhook Telegram на текущий сервер."""
+    webhook_url = f"{BACKEND_URL}/webhook/telegram"
+    result = await set_webhook(webhook_url)
+    return {"webhook_url": webhook_url, "telegram_response": result}
+
+
+# --- WhatsApp ---
+
+@router.post("/webhook/whatsapp")
+async def whatsapp_webhook(request: Request):
+    """Принимает входящие сообщения от WhatsApp (через WAHA)."""
+    body = await request.json()
+
+    if body.get("event") != "message":
+        return {"status": "ignored"}
+
+    message_data = body.get("payload", {})
+    chat_id = message_data.get("from", "")
+    text = message_data.get("body", "")
+    session = body.get("session", "default")
+
+    if not text or not chat_id:
+        return {"status": "empty"}
+
+    # Находим бота по сессии WhatsApp
+    bot_result = supabase.table("bots") \
+        .select("*") \
+        .eq("whatsapp_session", session) \
+        .limit(1) \
+        .execute()
+
+    if not bot_result.data:
+        return {"status": "bot_not_found"}
+
+    bot = bot_result.data[0]
+
+    ai_response = process_message(bot["id"], chat_id, text, "whatsapp")
+
+    if ai_response:
+        await send_whatsapp_message(chat_id, ai_response, session)
+
+    return {"status": "ok"}
