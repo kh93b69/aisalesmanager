@@ -98,36 +98,44 @@ def process_message(bot_id: str, chat_id: str, text: str, channel: str):
 @router.post("/webhook/telegram")
 async def telegram_webhook(request: Request):
     """Принимает входящие сообщения от Telegram."""
-    body = await request.json()
+    try:
+        body = await request.json()
 
-    # Telegram отправляет объект Update
-    message = body.get("message")
-    if not message:
-        return {"status": "ignored"}
+        # Telegram отправляет объект Update
+        message = body.get("message")
+        if not message:
+            return {"status": "ignored"}
 
-    text = message.get("text", "")
-    chat_id = str(message["chat"]["id"])
+        text = message.get("text", "")
+        chat_id = str(message["chat"]["id"])
 
-    if not text:
-        return {"status": "empty"}
+        if not text:
+            return {"status": "empty"}
 
-    # Находим бота по telegram_token (для MVP — берём первого бота)
-    bot_result = supabase.table("bots") \
-        .select("*") \
-        .limit(1) \
-        .execute()
+        # Находим бота по telegram_token (для MVP — берём первого бота)
+        bot_result = supabase.table("bots") \
+            .select("*") \
+            .limit(1) \
+            .execute()
 
-    if not bot_result.data:
-        return {"status": "bot_not_found"}
+        if not bot_result.data:
+            return {"status": "bot_not_found"}
 
-    bot = bot_result.data[0]
+        bot = bot_result.data[0]
 
-    ai_response = process_message(bot["id"], chat_id, text, "telegram")
+        ai_response = process_message(bot["id"], chat_id, text, "telegram")
 
-    if ai_response:
-        await send_telegram_message(int(chat_id), ai_response)
+        if ai_response:
+            await send_telegram_message(int(chat_id), ai_response)
 
-    return {"status": "ok"}
+        return {"status": "ok"}
+
+    except Exception as error:
+        # Логируем ошибку и возвращаем детали (для отладки)
+        import traceback
+        error_details = traceback.format_exc()
+        print(f"TELEGRAM WEBHOOK ERROR: {error_details}")
+        return {"status": "error", "detail": str(error), "traceback": error_details}
 
 
 @router.post("/api/setup-telegram-webhook")
