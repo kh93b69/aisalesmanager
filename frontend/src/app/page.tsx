@@ -51,6 +51,9 @@ export default function Dashboard() {
   const [editPrompt, setEditPrompt] = useState("");
   const [editName, setEditName] = useState("");
   const [saving, setSaving] = useState(false);
+  const [knowledgeStatus, setKnowledgeStatus] = useState("");
+  const [uploadingImage, setUploadingImage] = useState(false);
+  const [botImages, setBotImages] = useState<{id: string; url: string; name: string}[]>([]);
   const messagesEndRef = useRef<HTMLDivElement>(null);
 
   // Загрузка ботов
@@ -71,6 +74,12 @@ export default function Dashboard() {
     if (!selectedBot) return;
     setEditPrompt(selectedBot.system_prompt);
     setEditName(selectedBot.name);
+
+    // Загружаем картинки бота
+    fetch(`${API_URL}/api/bots/${selectedBot.id}/images`)
+      .then((r) => r.json())
+      .then((data) => setBotImages(data.images || []))
+      .catch(() => setBotImages([]));
 
     const loadDialogs = () => {
       fetch(`${API_URL}/api/bots/${selectedBot.id}/dialogs`)
@@ -136,14 +145,19 @@ export default function Dashboard() {
   // Загрузка базы знаний
   const uploadKnowledge = async (file: File) => {
     if (!selectedBot) return;
+    setKnowledgeStatus("Загружаю...");
     const formData = new FormData();
     formData.append("file", file);
-    const res = await fetch(`${API_URL}/api/bots/${selectedBot.id}/knowledge`, {
-      method: "POST",
-      body: formData,
-    });
-    const data = await res.json();
-    alert(`База знаний загружена: ${data.chunks_count} фрагментов`);
+    try {
+      const res = await fetch(`${API_URL}/api/bots/${selectedBot.id}/knowledge`, {
+        method: "POST",
+        body: formData,
+      });
+      const data = await res.json();
+      setKnowledgeStatus(`Загружено: ${data.chunks_count} фрагментов (${data.format})`);
+    } catch {
+      setKnowledgeStatus("Ошибка загрузки");
+    }
   };
 
   // Удаление диалога
@@ -265,6 +279,11 @@ export default function Dashboard() {
                   }}
                 />
               </div>
+              {knowledgeStatus && (
+                <div style={{ marginTop: 8, fontSize: 13, color: knowledgeStatus.startsWith("Ошибка") ? "#d63031" : "#00b894", fontWeight: 500 }}>
+                  {knowledgeStatus}
+                </div>
+              )}
             </div>
 
             <div style={{ marginTop: 32 }}>
@@ -278,7 +297,7 @@ export default function Dashboard() {
                 onClick={() => document.getElementById("image-upload")?.click()}
               >
                 <div style={{ fontSize: 32, marginBottom: 8 }}>+</div>
-                <div>Загрузить картинку</div>
+                <div>{uploadingImage ? "Загрузка..." : "Загрузить картинку"}</div>
                 <div style={{ fontSize: 12, color: "#999", marginTop: 4 }}>JPG, PNG, WEBP</div>
                 <input
                   id="image-upload"
@@ -287,18 +306,47 @@ export default function Dashboard() {
                   onChange={async (e) => {
                     const file = e.target.files?.[0];
                     if (file && selectedBot) {
-                      const formData = new FormData();
-                      formData.append("file", file);
-                      const res = await fetch(`${API_URL}/api/bots/${selectedBot.id}/images`, {
-                        method: "POST",
-                        body: formData,
-                      });
-                      const data = await res.json();
-                      alert(`Картинка загружена: ${data.filename}`);
+                      setUploadingImage(true);
+                      try {
+                        const formData = new FormData();
+                        formData.append("file", file);
+                        const res = await fetch(`${API_URL}/api/bots/${selectedBot.id}/images`, {
+                          method: "POST",
+                          body: formData,
+                        });
+                        const data = await res.json();
+                        if (data.url) {
+                          setBotImages((prev) => [...prev, { id: "", url: data.url, name: data.filename }]);
+                        }
+                      } catch (err) {
+                        console.error("Ошибка загрузки картинки:", err);
+                      }
+                      setUploadingImage(false);
                     }
                   }}
                 />
               </div>
+
+              {/* Список загруженных картинок */}
+              {botImages.length > 0 && (
+                <div style={{ marginTop: 16 }}>
+                  <div style={{ fontSize: 13, color: "#666", marginBottom: 8 }}>Загруженные картинки:</div>
+                  <div style={{ display: "flex", flexWrap: "wrap", gap: 8 }}>
+                    {botImages.map((img, i) => (
+                      <div key={i} style={{ width: 80, textAlign: "center" }}>
+                        <img
+                          src={img.url}
+                          alt={img.name}
+                          style={{ width: 80, height: 80, objectFit: "cover", borderRadius: 8, border: "1px solid #ddd" }}
+                        />
+                        <div style={{ fontSize: 11, color: "#999", marginTop: 4, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                          {img.name}
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
             </div>
           </div>
         ) : selectedDialog ? (
