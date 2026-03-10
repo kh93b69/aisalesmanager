@@ -3,7 +3,7 @@ from app.database import supabase
 from app.ai_engine import get_ai_response
 from app.rag import search_knowledge
 from app.whatsapp import send_whatsapp_message
-from app.telegram import send_telegram_message, set_webhook
+from app.telegram import send_telegram_message, send_telegram_photo, set_webhook
 from app.config import BACKEND_URL
 
 router = APIRouter()
@@ -130,7 +130,20 @@ async def telegram_webhook(request: Request):
         ai_response = process_message(bot["id"], chat_id, text, "telegram")
 
         if ai_response:
-            await send_telegram_message(int(chat_id), ai_response)
+            # Проверяем, есть ли в ответе ссылки на картинки [IMAGE:url]
+            import re
+            image_urls = re.findall(r'\[IMAGE:(https?://[^\]]+)\]', ai_response)
+
+            # Убираем теги картинок из текста
+            clean_text = re.sub(r'\[IMAGE:https?://[^\]]+\]', '', ai_response).strip()
+
+            # Отправляем текст
+            if clean_text:
+                await send_telegram_message(int(chat_id), clean_text)
+
+            # Отправляем картинки
+            for img_url in image_urls:
+                await send_telegram_photo(int(chat_id), img_url)
 
         return {"status": "ok"}
 

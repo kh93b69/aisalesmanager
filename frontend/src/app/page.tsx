@@ -245,8 +245,8 @@ export default function Dashboard() {
             <div style={{ marginTop: 32 }}>
               <h3 style={{ marginBottom: 12 }}>База знаний</h3>
               <p style={{ fontSize: 14, color: "#666", marginBottom: 12 }}>
-                Загрузите текстовый файл с описанием услуг, ценами и FAQ.
-                ИИ будет использовать эту информацию для ответов.
+                Загрузите файл с описанием услуг, ценами и FAQ.
+                Поддерживаются: TXT, PDF, CSV, XLSX.
               </p>
               <div
                 className="upload-area"
@@ -254,14 +254,48 @@ export default function Dashboard() {
               >
                 <div style={{ fontSize: 32, marginBottom: 8 }}>+</div>
                 <div>Нажмите для загрузки файла</div>
-                <div style={{ fontSize: 12, color: "#999", marginTop: 4 }}>.txt файлы</div>
+                <div style={{ fontSize: 12, color: "#999", marginTop: 4 }}>PDF, TXT, CSV, XLSX</div>
                 <input
                   id="file-upload"
                   type="file"
-                  accept=".txt,.text"
+                  accept=".txt,.text,.pdf,.csv,.xlsx,.xls"
                   onChange={(e) => {
                     const file = e.target.files?.[0];
                     if (file) uploadKnowledge(file);
+                  }}
+                />
+              </div>
+            </div>
+
+            <div style={{ marginTop: 32 }}>
+              <h3 style={{ marginBottom: 12 }}>Картинки для бота</h3>
+              <p style={{ fontSize: 14, color: "#666", marginBottom: 12 }}>
+                Загрузите картинки (прайс-лист, портфолио и т.д.).
+                Бот сможет отправлять их клиентам.
+              </p>
+              <div
+                className="upload-area"
+                onClick={() => document.getElementById("image-upload")?.click()}
+              >
+                <div style={{ fontSize: 32, marginBottom: 8 }}>+</div>
+                <div>Загрузить картинку</div>
+                <div style={{ fontSize: 12, color: "#999", marginTop: 4 }}>JPG, PNG, WEBP</div>
+                <input
+                  id="image-upload"
+                  type="file"
+                  accept="image/*"
+                  onChange={async (e) => {
+                    const file = e.target.files?.[0];
+                    if (file && selectedBot) {
+                      const formData = new FormData();
+                      formData.append("file", file);
+                      const res = await fetch(`${API_URL}/api/bots/${selectedBot.id}/images`, {
+                        method: "POST",
+                        body: formData,
+                      });
+                      const data = await res.json();
+                      alert(`Картинка загружена: ${data.filename}`);
+                    }
                   }}
                 />
               </div>
