@@ -214,10 +214,11 @@ async def whatsapp_webhook(request: Request):
         if not text or not chat_id:
             return {"status": "empty"}
 
-        # Находим бота по сессии WhatsApp
+        # Находим бота по сессии WhatsApp (берём последнего обновлённого)
         bot_result = supabase.table("bots") \
             .select("*") \
             .eq("whatsapp_session", session) \
+            .order("created_at", desc=True) \
             .limit(1) \
             .execute()
 
