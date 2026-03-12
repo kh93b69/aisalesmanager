@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useState, useRef } from "react";
+import { useRouter } from "next/navigation";
 
 const API_URL = process.env.NEXT_PUBLIC_API_URL || "";
 
@@ -27,6 +28,12 @@ type Message = {
   created_at: string;
 };
 
+type UserData = {
+  id: string;
+  email: string;
+  role?: string;
+};
+
 // --- Вспомогательные функции ---
 
 function formatTime(dateStr: string) {
@@ -39,9 +46,30 @@ function formatDate(dateStr: string) {
   return date.toLocaleDateString("ru-RU", { day: "numeric", month: "short", hour: "2-digit", minute: "2-digit" });
 }
 
+// Обёртка для fetch с авторизацией
+function authFetch(url: string, options: RequestInit = {}) {
+  const token = localStorage.getItem("access_token");
+  const headers: Record<string, string> = {
+    ...(options.headers as Record<string, string> || {}),
+  };
+
+  if (token) {
+    headers["Authorization"] = `Bearer ${token}`;
+  }
+
+  // Не ставим Content-Type для FormData (браузер сам поставит boundary)
+  if (!(options.body instanceof FormData)) {
+    headers["Content-Type"] = headers["Content-Type"] || "application/json";
+  }
+
+  return fetch(url, { ...options, headers });
+}
+
 // --- Главный компонент ---
 
 export default function Dashboard() {
+  const router = useRouter();
+  const [user, setUser] = useState<UserData | null>(null);
   const [bots, setBots] = useState<Bot[]>([]);
   const [selectedBot, setSelectedBot] = useState<Bot | null>(null);
   const [dialogs, setDialogs] = useState<Dialog[]>([]);
@@ -54,11 +82,53 @@ export default function Dashboard() {
   const [knowledgeStatus, setKnowledgeStatus] = useState("");
   const [uploadingImage, setUploadingImage] = useState(false);
   const [botImages, setBotImages] = useState<{id: string; url: string; name: string}[]>([]);
+  const [showCreateBot, setShowCreateBot] = useState(false);
+  const [newBotName, setNewBotName] = useState("");
+  const [waStatus, setWaStatus] = useState("");
+  const [waQr, setWaQr] = useState("");
+  const [waLoading, setWaLoading] = useState(false);
   const messagesEndRef = useRef<HTMLDivElement>(null);
+
+  // Проверка авторизации
+  useEffect(() => {
+    const token = localStorage.getItem("access_token");
+    if (!token) {
+      router.push("/login");
+      return;
+    }
+
+    const savedUser = localStorage.getItem("user");
+    if (savedUser) {
+      setUser(JSON.parse(savedUser));
+    }
+
+    // Проверяем токен на сервере
+    authFetch(`${API_URL}/api/auth/me`)
+      .then((r) => {
+        if (!r.ok) {
+          localStorage.removeItem("access_token");
+          localStorage.removeItem("user");
+          router.push("/login");
+          return null;
+        }
+        return r.json();
+      })
+      .then((data) => {
+        if (data?.user) {
+          setUser(data.user);
+          localStorage.setItem("user", JSON.stringify(data.user));
+        }
+      })
+      .catch(() => {
+        router.push("/login");
+      });
+  }, [router]);
 
   // Загрузка ботов
   useEffect(() => {
-    fetch(`${API_URL}/api/bots`)
+    if (!user) return;
+
+    authFetch(`${API_URL}/api/bots`)
       .then((r) => r.json())
       .then((data) => {
         setBots(data.bots || []);
@@ -67,7 +137,7 @@ export default function Dashboard() {
         }
       })
       .catch((err) => console.error("Ошибка загрузки ботов:", err));
-  }, []);
+  }, [user]);
 
   // Загрузка диалогов при выборе бота
   useEffect(() => {
@@ -75,14 +145,18 @@ export default function Dashboard() {
     setEditPrompt(selectedBot.system_prompt);
     setEditName(selectedBot.name);
 
+    // Проверяем статус WhatsApp
+    setWaStatus("");
+    setWaQr("");
+
     // Загружаем картинки бота
-    fetch(`${API_URL}/api/bots/${selectedBot.id}/images`)
+    authFetch(`${API_URL}/api/bots/${selectedBot.id}/images`)
       .then((r) => r.json())
       .then((data) => setBotImages(data.images || []))
       .catch(() => setBotImages([]));
 
     const loadDialogs = () => {
-      fetch(`${API_URL}/api/bots/${selectedBot.id}/dialogs`)
+      authFetch(`${API_URL}/api/bots/${selectedBot.id}/dialogs`)
         .then((r) => r.json())
         .then((data) => setDialogs(data.dialogs || []))
         .catch((err) => console.error("Ошибка загрузки диалогов:", err));
@@ -98,7 +172,7 @@ export default function Dashboard() {
     if (!selectedDialog) return;
 
     const loadMessages = () => {
-      fetch(`${API_URL}/api/dialogs/${selectedDialog.id}/messages`)
+      authFetch(`${API_URL}/api/dialogs/${selectedDialog.id}/messages`)
         .then((r) => r.json())
         .then((data) => setMessages(data.messages || []))
         .catch((err) => console.error("Ошибка загрузки сообщений:", err));
@@ -114,9 +188,17 @@ export default function Dashboard() {
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [messages]);
 
+  // Выход
+  const logout = () => {
+    localStorage.removeItem("access_token");
+    localStorage.removeItem("refresh_token");
+    localStorage.removeItem("user");
+    router.push("/login");
+  };
+
   // Переключение ИИ
   const toggleAI = async (dialogId: string) => {
-    const res = await fetch(`${API_URL}/api/dialogs/${dialogId}/toggle-ai`, { method: "POST" });
+    const res = await authFetch(`${API_URL}/api/dialogs/${dialogId}/toggle-ai`, { method: "POST" });
     const data = await res.json();
     setDialogs((prev) =>
       prev.map((d) => (d.id === dialogId ? { ...d, ai_disabled: data.ai_disabled } : d))
@@ -130,9 +212,8 @@ export default function Dashboard() {
   const saveSettings = async () => {
     if (!selectedBot) return;
     setSaving(true);
-    const res = await fetch(`${API_URL}/api/bots/${selectedBot.id}`, {
+    const res = await authFetch(`${API_URL}/api/bots/${selectedBot.id}`, {
       method: "PUT",
-      headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ name: editName, system_prompt: editPrompt }),
     });
     const data = await res.json();
@@ -149,7 +230,7 @@ export default function Dashboard() {
     const formData = new FormData();
     formData.append("file", file);
     try {
-      const res = await fetch(`${API_URL}/api/bots/${selectedBot.id}/knowledge`, {
+      const res = await authFetch(`${API_URL}/api/bots/${selectedBot.id}/knowledge`, {
         method: "POST",
         body: formData,
       });
@@ -162,7 +243,7 @@ export default function Dashboard() {
 
   // Удаление диалога
   const deleteDialog = async (dialogId: string) => {
-    await fetch(`${API_URL}/api/dialogs/${dialogId}`, { method: "DELETE" });
+    await authFetch(`${API_URL}/api/dialogs/${dialogId}`, { method: "DELETE" });
     setDialogs((prev) => prev.filter((d) => d.id !== dialogId));
     if (selectedDialog?.id === dialogId) {
       setSelectedDialog(null);
@@ -170,21 +251,115 @@ export default function Dashboard() {
     }
   };
 
+  // Создание нового бота
+  const createBot = async () => {
+    if (!newBotName.trim()) return;
+    const res = await authFetch(`${API_URL}/api/bots`, {
+      method: "POST",
+      body: JSON.stringify({ name: newBotName, system_prompt: "" }),
+    });
+    const data = await res.json();
+    if (data.bot) {
+      setBots((prev) => [...prev, data.bot]);
+      setSelectedBot(data.bot);
+      setNewBotName("");
+      setShowCreateBot(false);
+    }
+  };
+
+  // Проверка статуса WhatsApp
+  const checkWaStatus = async () => {
+    if (!selectedBot) return;
+    try {
+      const res = await authFetch(`${API_URL}/api/bots/${selectedBot.id}/whatsapp/status`);
+      const data = await res.json();
+      setWaStatus(data.status || "NOT_FOUND");
+
+      // Если ожидает QR — загружаем QR-код
+      if (data.status === "SCAN_QR_CODE") {
+        const qrRes = await authFetch(`${API_URL}/api/bots/${selectedBot.id}/whatsapp/qr`);
+        const qrData = await qrRes.json();
+        if (qrData.qr) {
+          setWaQr(qrData.qr);
+        }
+      } else {
+        setWaQr("");
+      }
+    } catch {
+      setWaStatus("ERROR");
+    }
+  };
+
+  // Подключить WhatsApp
+  const connectWhatsApp = async () => {
+    if (!selectedBot) return;
+    setWaLoading(true);
+    try {
+      await authFetch(`${API_URL}/api/bots/${selectedBot.id}/whatsapp/start`, { method: "POST" });
+      // Ждём немного и проверяем статус
+      setTimeout(() => checkWaStatus(), 2000);
+    } catch (err) {
+      console.error("Ошибка подключения WhatsApp:", err);
+    }
+    setWaLoading(false);
+  };
+
+  // Отключить WhatsApp
+  const disconnectWhatsApp = async () => {
+    if (!selectedBot) return;
+    setWaLoading(true);
+    try {
+      await authFetch(`${API_URL}/api/bots/${selectedBot.id}/whatsapp/stop`, { method: "POST" });
+      setWaStatus("STOPPED");
+      setWaQr("");
+    } catch (err) {
+      console.error("Ошибка отключения WhatsApp:", err);
+    }
+    setWaLoading(false);
+  };
+
+  if (!user) {
+    return <div className="empty-state">Загрузка...</div>;
+  }
+
   return (
     <div style={{ display: "flex", height: "100vh" }}>
       {/* === БОКОВАЯ ПАНЕЛЬ === */}
       <div className="sidebar">
         <div className="sidebar-header">
           <h2>AI Sales Manager</h2>
-          <button className="btn btn-sm btn-outline" onClick={() => setShowSettings(!showSettings)}>
-            {showSettings ? "Диалоги" : "Настройки"}
-          </button>
+          <div style={{ display: "flex", gap: 4 }}>
+            <button className="btn btn-sm btn-outline" onClick={() => setShowSettings(!showSettings)}>
+              {showSettings ? "Диалоги" : "Настройки"}
+            </button>
+          </div>
+        </div>
+
+        {/* Инфо о пользователе */}
+        <div className="user-info">
+          <span>{user.email}</span>
+          <button className="btn-logout" onClick={logout}>Выйти</button>
         </div>
 
         {/* Список ботов */}
-        <div style={{ padding: "12px 20px", fontSize: 12, color: "#999", fontWeight: 600, textTransform: "uppercase" }}>
-          Боты
+        <div className="section-title">
+          <span>Боты</span>
+          <button className="btn btn-sm btn-outline" onClick={() => setShowCreateBot(!showCreateBot)}>+</button>
         </div>
+
+        {showCreateBot && (
+          <div style={{ padding: "8px 20px" }}>
+            <input
+              value={newBotName}
+              onChange={(e) => setNewBotName(e.target.value)}
+              placeholder="Имя бота"
+              style={{ marginBottom: 8, width: "100%", padding: 8, borderRadius: 6, border: "1px solid #ddd" }}
+              onKeyDown={(e) => e.key === "Enter" && createBot()}
+            />
+            <button className="btn btn-sm btn-primary" onClick={createBot}>Создать</button>
+          </div>
+        )}
+
         {bots.map((bot) => (
           <div
             key={bot.id}
@@ -193,7 +368,7 @@ export default function Dashboard() {
           >
             <div style={{ fontWeight: 500 }}>{bot.name}</div>
             <div style={{ fontSize: 12, color: "#999", marginTop: 2 }}>
-              {bot.system_prompt.slice(0, 50)}...
+              {bot.system_prompt ? bot.system_prompt.slice(0, 50) + "..." : "Промпт не задан"}
             </div>
           </div>
         ))}
@@ -201,13 +376,13 @@ export default function Dashboard() {
         {/* Список диалогов */}
         {selectedBot && !showSettings && (
           <>
-            <div style={{ padding: "12px 20px", fontSize: 12, color: "#999", fontWeight: 600, textTransform: "uppercase", borderTop: "1px solid #e1e4e8" }}>
-              Диалоги ({dialogs.length})
+            <div className="section-title" style={{ borderTop: "1px solid #e1e4e8" }}>
+              <span>Диалоги ({dialogs.length})</span>
             </div>
             <div style={{ flex: 1, overflowY: "auto" }}>
               {dialogs.length === 0 && (
                 <div style={{ padding: 20, color: "#999", textAlign: "center" }}>
-                  Нет диалогов. Напишите боту в Telegram!
+                  Нет диалогов. Напишите боту в мессенджере!
                 </div>
               )}
               {dialogs.map((dialog) => (
@@ -218,7 +393,10 @@ export default function Dashboard() {
                 >
                   <div className="dialog-info">
                     <div className="dialog-chat-id">{dialog.chat_id}</div>
-                    <div className="dialog-meta">{dialog.channel} &middot; {formatDate(dialog.created_at)}</div>
+                    <div className="dialog-meta">
+                      <span className={`channel-badge channel-${dialog.channel}`}>{dialog.channel}</span>
+                      &nbsp;{formatDate(dialog.created_at)}
+                    </div>
                   </div>
                   <span className={`badge ${dialog.ai_disabled ? "badge-red" : "badge-green"}`}>
                     {dialog.ai_disabled ? "ИИ выкл" : "ИИ вкл"}
@@ -227,6 +405,15 @@ export default function Dashboard() {
               ))}
             </div>
           </>
+        )}
+
+        {/* Ссылка на админку (если admin) */}
+        {user.role === "admin" && (
+          <div style={{ padding: "12px 20px", borderTop: "1px solid #e1e4e8" }}>
+            <button className="btn btn-sm btn-outline" style={{ width: "100%" }} onClick={() => router.push("/admin")}>
+              Админка
+            </button>
+          </div>
         )}
       </div>
 
@@ -310,7 +497,7 @@ export default function Dashboard() {
                       try {
                         const formData = new FormData();
                         formData.append("file", file);
-                        const res = await fetch(`${API_URL}/api/bots/${selectedBot.id}/images`, {
+                        const res = await authFetch(`${API_URL}/api/bots/${selectedBot.id}/images`, {
                           method: "POST",
                           body: formData,
                         });
@@ -327,7 +514,6 @@ export default function Dashboard() {
                 />
               </div>
 
-              {/* Список загруженных картинок */}
               {botImages.length > 0 && (
                 <div style={{ marginTop: 16 }}>
                   <div style={{ fontSize: 13, color: "#666", marginBottom: 8 }}>Загруженные картинки:</div>
@@ -348,6 +534,66 @@ export default function Dashboard() {
                 </div>
               )}
             </div>
+
+            {/* --- WhatsApp --- */}
+            <div style={{ marginTop: 32 }}>
+              <h3 style={{ marginBottom: 12 }}>WhatsApp</h3>
+              <p style={{ fontSize: 14, color: "#666", marginBottom: 12 }}>
+                Подключите WhatsApp для приёма сообщений от клиентов.
+              </p>
+
+              <div style={{ display: "flex", gap: 8, alignItems: "center", marginBottom: 16 }}>
+                <span style={{
+                  padding: "4px 12px",
+                  borderRadius: 12,
+                  fontSize: 13,
+                  fontWeight: 500,
+                  background: waStatus === "WORKING" ? "#e6f9f0" : waStatus === "SCAN_QR_CODE" ? "#fff3e0" : "#f5f5f5",
+                  color: waStatus === "WORKING" ? "#00b894" : waStatus === "SCAN_QR_CODE" ? "#e17055" : "#999",
+                }}>
+                  {waStatus === "WORKING" ? "Подключен" :
+                   waStatus === "SCAN_QR_CODE" ? "Ожидание QR" :
+                   waStatus === "STARTING" ? "Запускается..." :
+                   waStatus === "STOPPED" ? "Остановлен" :
+                   waStatus === "ERROR" ? "Ошибка" :
+                   waStatus === "NOT_FOUND" ? "Не подключен" :
+                   waStatus || "Проверьте статус"}
+                </span>
+                <button className="btn btn-sm btn-outline" onClick={checkWaStatus} disabled={waLoading}>
+                  Обновить
+                </button>
+              </div>
+
+              {waStatus !== "WORKING" && (
+                <button className="btn btn-primary" onClick={connectWhatsApp} disabled={waLoading} style={{ marginRight: 8 }}>
+                  {waLoading ? "Подключение..." : "Подключить WhatsApp"}
+                </button>
+              )}
+
+              {waStatus === "WORKING" && (
+                <button className="btn btn-danger" onClick={disconnectWhatsApp} disabled={waLoading}>
+                  Отключить WhatsApp
+                </button>
+              )}
+
+              {waQr && (
+                <div style={{ marginTop: 16, textAlign: "center" }}>
+                  <p style={{ fontSize: 14, color: "#666", marginBottom: 8 }}>
+                    Отсканируйте QR-код в WhatsApp (Настройки &rarr; Связанные устройства)
+                  </p>
+                  <img
+                    src={waQr}
+                    alt="WhatsApp QR Code"
+                    style={{ width: 256, height: 256, border: "1px solid #ddd", borderRadius: 8 }}
+                  />
+                  <div style={{ marginTop: 8 }}>
+                    <button className="btn btn-sm btn-outline" onClick={checkWaStatus}>
+                      Проверить подключение
+                    </button>
+                  </div>
+                </div>
+              )}
+            </div>
           </div>
         ) : selectedDialog ? (
           /* --- Диалог с сообщениями --- */
@@ -355,7 +601,9 @@ export default function Dashboard() {
             <div className="main-header">
               <div>
                 <h2>Чат: {selectedDialog.chat_id}</h2>
-                <span style={{ fontSize: 12, color: "#999" }}>{selectedDialog.channel}</span>
+                <span style={{ fontSize: 12, color: "#999" }}>
+                  <span className={`channel-badge channel-${selectedDialog.channel}`}>{selectedDialog.channel}</span>
+                </span>
               </div>
               <div style={{ display: "flex", gap: 8 }}>
                 <button
@@ -385,7 +633,7 @@ export default function Dashboard() {
           </>
         ) : (
           <div className="empty-state">
-            {selectedBot ? "Выберите диалог слева" : "Выберите бота"}
+            {selectedBot ? "Выберите диалог слева" : "Выберите бота или создайте нового"}
           </div>
         )}
       </div>

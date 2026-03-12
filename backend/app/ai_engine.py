@@ -13,26 +13,40 @@ def get_ai_response(system_prompt: str, messages: list, knowledge_context: str =
     # Если есть контекст из базы знаний, добавляем его в системный промпт
     full_system_prompt = system_prompt
     if knowledge_context:
-        full_system_prompt += f"\n\n--- БАЗА ЗНАНИЙ ---\n{knowledge_context}\n--- КОНЕЦ БАЗЫ ЗНАНИЙ ---\n\nИспользуй информацию из базы знаний для ответа. Если в базе знаний нет нужной информации, отвечай на основе общей логики промпта."
+        full_system_prompt += f"\n\n--- БАЗА ЗНАНИЙ ---\n{knowledge_context}\n--- КОНЕЦ БАЗЫ ЗНАНИЙ ---\n\nИспользуй информацию из базы знаний для ответа. Отвечай точными данными из базы знаний (цены, названия, характеристики). Если в базе знаний нет нужной информации, честно скажи что нужно уточнить."
 
     # Формируем сообщения для OpenAI API
     openai_messages = [{"role": "system", "content": full_system_prompt}]
     openai_messages.extend(messages)
 
-    # Запрос к OpenAI API напрямую через httpx (без SDK — меньше зависимостей)
-    response = httpx.post(
-        "https://api.openai.com/v1/chat/completions",
-        headers={
-            "Authorization": f"Bearer {OPENAI_API_KEY}",
-            "Content-Type": "application/json",
-        },
-        json={
-            "model": "gpt-4o-mini",
-            "messages": openai_messages,
-            "max_tokens": 1024,
-        },
-        timeout=30,
-    )
+    try:
+        # Запрос к OpenAI API напрямую через httpx (без SDK — меньше зависимостей)
+        response = httpx.post(
+            "https://api.openai.com/v1/chat/completions",
+            headers={
+                "Authorization": f"Bearer {OPENAI_API_KEY}",
+                "Content-Type": "application/json",
+            },
+            json={
+                "model": "gpt-4o-mini",
+                "messages": openai_messages,
+                "max_tokens": 1024,
+            },
+            timeout=30,
+        )
 
-    data = response.json()
-    return data["choices"][0]["message"]["content"]
+        data = response.json()
+
+        # Проверяем наличие ошибки в ответе
+        if "error" in data:
+            print(f"OPENAI API ERROR: {data['error']}")
+            return "Извините, произошла техническая ошибка. Попробуйте позже."
+
+        return data["choices"][0]["message"]["content"]
+
+    except httpx.TimeoutException:
+        print("OPENAI API TIMEOUT")
+        return "Извините, ответ занимает слишком много времени. Попробуйте позже."
+    except Exception as e:
+        print(f"OPENAI API ERROR: {e}")
+        return "Извините, произошла техническая ошибка. Попробуйте позже."

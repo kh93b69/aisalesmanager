@@ -1,12 +1,18 @@
-from fastapi import APIRouter
+from fastapi import APIRouter, Depends
 from app.database import supabase
+from app.auth import get_current_user
 
 router = APIRouter()
 
 
 @router.get("/api/bots/{bot_id}/dialogs")
-def get_dialogs(bot_id: str):
+def get_dialogs(bot_id: str, user: dict = Depends(get_current_user)):
     """Получает список всех диалогов бота."""
+    # Проверяем что бот принадлежит пользователю
+    bot = supabase.table("bots").select("id").eq("id", bot_id).eq("user_id", user["id"]).limit(1).execute()
+    if not bot.data:
+        return {"dialogs": []}
+
     result = supabase.table("dialogs") \
         .select("*") \
         .eq("bot_id", bot_id) \
@@ -17,7 +23,7 @@ def get_dialogs(bot_id: str):
 
 
 @router.get("/api/dialogs/{dialog_id}/messages")
-def get_messages(dialog_id: str):
+def get_messages(dialog_id: str, user: dict = Depends(get_current_user)):
     """Получает все сообщения диалога."""
     result = supabase.table("messages") \
         .select("*") \
@@ -29,11 +35,8 @@ def get_messages(dialog_id: str):
 
 
 @router.post("/api/dialogs/{dialog_id}/toggle-ai")
-def toggle_ai(dialog_id: str):
-    """
-    Переключает режим "Перехват" — включает/отключает ИИ для диалога.
-    """
-    # Получаем текущий статус
+def toggle_ai(dialog_id: str, user: dict = Depends(get_current_user)):
+    """Переключает режим "Перехват" — включает/отключает ИИ для диалога."""
     dialog = supabase.table("dialogs") \
         .select("ai_disabled") \
         .eq("id", dialog_id) \
@@ -45,7 +48,6 @@ def toggle_ai(dialog_id: str):
 
     current_status = dialog.data[0].get("ai_disabled", False)
 
-    # Переключаем
     supabase.table("dialogs") \
         .update({"ai_disabled": not current_status}) \
         .eq("id", dialog_id) \
@@ -55,7 +57,7 @@ def toggle_ai(dialog_id: str):
 
 
 @router.delete("/api/dialogs/{dialog_id}")
-def delete_dialog(dialog_id: str):
+def delete_dialog(dialog_id: str, user: dict = Depends(get_current_user)):
     """Удаляет диалог и все его сообщения."""
     supabase.table("messages").delete().eq("dialog_id", dialog_id).execute()
     supabase.table("dialogs").delete().eq("id", dialog_id).execute()

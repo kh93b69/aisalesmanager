@@ -4,23 +4,29 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse
 from app.config import FRONTEND_URL
-from app.routes import webhooks, dialogs, settings
+from app.routes import webhooks, dialogs, settings, auth, admin
 
 app = FastAPI(title="AI Sales Manager API")
 
 # Разрешаем запросы с фронтенда
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[FRONTEND_URL, "http://localhost:3000", "http://localhost:3001"],
+    allow_origins=[
+        FRONTEND_URL,
+        "http://localhost:3000",
+        "http://localhost:3001",
+    ],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
 # Подключаем API роуты
+app.include_router(auth.router)
 app.include_router(webhooks.router)
 app.include_router(dialogs.router)
 app.include_router(settings.router)
+app.include_router(admin.router)
 
 
 @app.get("/api/health")

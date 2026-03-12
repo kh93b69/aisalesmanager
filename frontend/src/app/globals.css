@@ -6,15 +6,15 @@
 
 body {
   font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
-  background: #f5f6fa;
-  color: #2d3436;
+  background: #f0f2f5;
+  color: #1a1a2e;
 }
 
-/* Боковая панель */
+/* === БОКОВАЯ ПАНЕЛЬ === */
 .sidebar {
   width: 320px;
-  background: #fff;
-  border-right: 1px solid #e1e4e8;
+  background: #1a1a2e;
+  color: #e0e0e0;
   display: flex;
   flex-direction: column;
   height: 100vh;
@@ -22,37 +22,99 @@ body {
 
 .sidebar-header {
   padding: 20px;
-  border-bottom: 1px solid #e1e4e8;
+  border-bottom: 1px solid rgba(255,255,255,0.08);
   display: flex;
   justify-content: space-between;
   align-items: center;
 }
 
 .sidebar-header h2 {
-  font-size: 18px;
-  font-weight: 600;
+  font-size: 17px;
+  font-weight: 700;
+  color: #fff;
+  letter-spacing: -0.3px;
 }
 
+/* Инфо о пользователе */
+.user-info {
+  padding: 10px 20px;
+  border-bottom: 1px solid rgba(255,255,255,0.08);
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  font-size: 13px;
+  color: #8b8ba3;
+}
+
+.btn-logout {
+  background: none;
+  border: none;
+  color: #e17055;
+  font-size: 12px;
+  cursor: pointer;
+  padding: 4px 8px;
+  border-radius: 4px;
+  transition: background 0.15s;
+}
+
+.btn-logout:hover {
+  background: rgba(225,112,85,0.15);
+}
+
+/* Заголовки секций */
+.section-title {
+  padding: 12px 20px;
+  font-size: 11px;
+  color: #6c6c85;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}
+
+.section-title .btn {
+  background: rgba(255,255,255,0.08);
+  border: none;
+  color: #8b8ba3;
+}
+
+.section-title .btn:hover {
+  background: rgba(255,255,255,0.15);
+  color: #fff;
+}
+
+/* Элемент бота */
 .bot-item {
   padding: 12px 20px;
   cursor: pointer;
-  border-bottom: 1px solid #f0f0f0;
+  border-bottom: 1px solid rgba(255,255,255,0.04);
   transition: background 0.15s;
 }
 
 .bot-item:hover {
-  background: #f5f6fa;
+  background: rgba(255,255,255,0.06);
 }
 
 .bot-item.active {
-  background: #e8f4fd;
-  border-left: 3px solid #0984e3;
+  background: rgba(108,92,231,0.2);
+  border-left: 3px solid #6c5ce7;
 }
 
+.bot-item div:first-child {
+  color: #e0e0e0;
+}
+
+.bot-item div:last-child {
+  color: #6c6c85 !important;
+}
+
+/* Элемент диалога */
 .dialog-item {
   padding: 12px 20px;
   cursor: pointer;
-  border-bottom: 1px solid #f0f0f0;
+  border-bottom: 1px solid rgba(255,255,255,0.04);
   transition: background 0.15s;
   display: flex;
   justify-content: space-between;
@@ -60,11 +122,11 @@ body {
 }
 
 .dialog-item:hover {
-  background: #f5f6fa;
+  background: rgba(255,255,255,0.06);
 }
 
 .dialog-item.active {
-  background: #e8f8e8;
+  background: rgba(0,184,148,0.15);
 }
 
 .dialog-info {
@@ -73,68 +135,94 @@ body {
 }
 
 .dialog-chat-id {
-  font-size: 14px;
+  font-size: 13px;
   font-weight: 500;
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
+  color: #e0e0e0;
 }
 
 .dialog-meta {
-  font-size: 12px;
-  color: #999;
-  margin-top: 2px;
+  font-size: 11px;
+  color: #6c6c85;
+  margin-top: 3px;
 }
 
+/* Бейджи каналов */
+.channel-badge {
+  display: inline-block;
+  padding: 1px 6px;
+  border-radius: 3px;
+  font-size: 10px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.3px;
+}
+
+.channel-telegram { background: #039be5; color: #fff; }
+.channel-whatsapp { background: #25d366; color: #fff; }
+.channel-instagram { background: #e1306c; color: #fff; }
+
+/* Бейджи статуса */
 .badge {
-  font-size: 11px;
+  font-size: 10px;
   padding: 2px 8px;
   border-radius: 10px;
-  font-weight: 500;
+  font-weight: 600;
   white-space: nowrap;
 }
 
 .badge-green {
-  background: #d4edda;
-  color: #155724;
+  background: rgba(0,184,148,0.2);
+  color: #00b894;
 }
 
 .badge-red {
-  background: #f8d7da;
-  color: #721c24;
+  background: rgba(214,48,49,0.2);
+  color: #ff6b6b;
 }
 
-/* Основная область */
+.badge-purple {
+  background: rgba(108,92,231,0.2);
+  color: #a29bfe;
+}
+
+/* === ОСНОВНАЯ ОБЛАСТЬ === */
 .main-area {
   flex: 1;
   display: flex;
   flex-direction: column;
   height: 100vh;
+  background: #f0f2f5;
 }
 
 .main-header {
   padding: 16px 24px;
   background: #fff;
-  border-bottom: 1px solid #e1e4e8;
+  border-bottom: 1px solid #e4e6eb;
   display: flex;
   justify-content: space-between;
   align-items: center;
+  box-shadow: 0 1px 2px rgba(0,0,0,0.05);
 }
 
 .main-header h2 {
   font-size: 16px;
   font-weight: 600;
+  color: #1a1a2e;
 }
 
-/* Сообщения */
+/* === СООБЩЕНИЯ === */
 .messages-area {
   flex: 1;
   overflow-y: auto;
   padding: 24px;
+  background: #f0f2f5;
 }
 
 .message {
-  margin-bottom: 16px;
+  margin-bottom: 12px;
   max-width: 65%;
 }
 
@@ -147,21 +235,26 @@ body {
 }
 
 .message-bubble {
-  padding: 12px 16px;
-  border-radius: 16px;
+  padding: 10px 14px;
+  border-radius: 18px;
   font-size: 14px;
   line-height: 1.5;
+  word-break: break-word;
+  white-space: pre-wrap;
 }
 
 .message-user .message-bubble {
-  background: #f0f0f0;
+  background: #fff;
+  color: #1a1a2e;
   border-bottom-left-radius: 4px;
+  box-shadow: 0 1px 2px rgba(0,0,0,0.08);
 }
 
 .message-assistant .message-bubble {
-  background: #0984e3;
+  background: #6c5ce7;
   color: #fff;
   border-bottom-right-radius: 4px;
+  box-shadow: 0 1px 3px rgba(108,92,231,0.3);
 }
 
 .message-time {
@@ -175,34 +268,49 @@ body {
   text-align: right;
 }
 
-/* Пустые состояния */
+/* === ПУСТЫЕ СОСТОЯНИЯ === */
 .empty-state {
   display: flex;
   align-items: center;
   justify-content: center;
   height: 100%;
   color: #999;
-  font-size: 16px;
+  font-size: 15px;
 }
 
-/* Кнопки */
+/* === КНОПКИ === */
 .btn {
   padding: 8px 16px;
   border: none;
   border-radius: 8px;
   cursor: pointer;
-  font-size: 14px;
+  font-size: 13px;
   font-weight: 500;
-  transition: opacity 0.15s;
+  transition: all 0.15s;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
 }
 
 .btn:hover {
-  opacity: 0.85;
+  opacity: 0.9;
+  transform: translateY(-1px);
+}
+
+.btn:active {
+  transform: translateY(0);
+}
+
+.btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+  transform: none;
 }
 
 .btn-primary {
-  background: #0984e3;
+  background: #6c5ce7;
   color: #fff;
+  box-shadow: 0 2px 8px rgba(108,92,231,0.3);
 }
 
 .btn-danger {
@@ -222,26 +330,26 @@ body {
 }
 
 .btn-sm {
-  padding: 4px 12px;
+  padding: 5px 10px;
   font-size: 12px;
+  border-radius: 6px;
 }
 
-/* Настройки бота */
-.settings-panel {
-  width: 380px;
-  background: #fff;
-  border-left: 1px solid #e1e4e8;
-  padding: 24px;
-  overflow-y: auto;
-  height: 100vh;
+/* Кнопки в тёмном сайдбаре */
+.sidebar .btn-outline {
+  border-color: rgba(255,255,255,0.15);
+  color: #e0e0e0;
 }
 
-.settings-panel h3 {
-  font-size: 16px;
-  font-weight: 600;
-  margin-bottom: 16px;
+.sidebar .btn-outline:hover {
+  background: rgba(255,255,255,0.08);
 }
 
+.sidebar .btn-primary {
+  background: #6c5ce7;
+}
+
+/* === ФОРМЫ === */
 .form-group {
   margin-bottom: 16px;
 }
@@ -249,20 +357,24 @@ body {
 .form-group label {
   display: block;
   font-size: 13px;
-  font-weight: 500;
-  color: #666;
+  font-weight: 600;
+  color: #555;
   margin-bottom: 6px;
 }
 
 .form-group input,
-.form-group textarea {
+.form-group textarea,
+.form-group select {
   width: 100%;
   padding: 10px 12px;
-  border: 1px solid #ddd;
+  border: 1px solid #e4e6eb;
   border-radius: 8px;
   font-size: 14px;
   font-family: inherit;
   resize: vertical;
+  background: #fff;
+  color: #1a1a2e;
+  transition: border-color 0.15s, box-shadow 0.15s;
 }
 
 .form-group textarea {
@@ -270,51 +382,278 @@ body {
 }
 
 .form-group input:focus,
-.form-group textarea:focus {
+.form-group textarea:focus,
+.form-group select:focus {
   outline: none;
-  border-color: #0984e3;
+  border-color: #6c5ce7;
+  box-shadow: 0 0 0 3px rgba(108,92,231,0.12);
 }
 
-/* Секция загрузки файлов */
+/* === ЗАГРУЗКА ФАЙЛОВ === */
 .upload-area {
-  border: 2px dashed #ddd;
-  border-radius: 8px;
+  border: 2px dashed #d4d5db;
+  border-radius: 12px;
   padding: 24px;
   text-align: center;
   cursor: pointer;
-  transition: border-color 0.15s;
+  transition: all 0.15s;
+  background: #fafafa;
 }
 
 .upload-area:hover {
-  border-color: #0984e3;
+  border-color: #6c5ce7;
+  background: rgba(108,92,231,0.04);
 }
 
 .upload-area input[type="file"] {
   display: none;
 }
 
-/* Секция навигации */
+/* === СТРАНИЦА ЛОГИНА === */
+.login-page {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 100vh;
+  background: linear-gradient(135deg, #1a1a2e 0%, #16213e 50%, #0f3460 100%);
+}
+
+.login-card {
+  background: #fff;
+  border-radius: 16px;
+  padding: 40px;
+  width: 100%;
+  max-width: 420px;
+  box-shadow: 0 20px 60px rgba(0,0,0,0.3);
+}
+
+.login-logo {
+  text-align: center;
+  margin-bottom: 32px;
+}
+
+.login-logo h1 {
+  font-size: 24px;
+  font-weight: 700;
+  color: #1a1a2e;
+  margin-bottom: 8px;
+}
+
+.login-logo p {
+  font-size: 14px;
+  color: #999;
+}
+
+.login-tabs {
+  display: flex;
+  border-bottom: 1px solid #e4e6eb;
+  margin-bottom: 24px;
+}
+
+.login-tab {
+  flex: 1;
+  padding: 12px;
+  text-align: center;
+  cursor: pointer;
+  font-size: 14px;
+  font-weight: 500;
+  color: #999;
+  border: none;
+  background: none;
+  border-bottom: 2px solid transparent;
+  transition: all 0.15s;
+}
+
+.login-tab:hover {
+  color: #555;
+}
+
+.login-tab.active {
+  color: #6c5ce7;
+  border-bottom-color: #6c5ce7;
+}
+
+.login-form {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.login-btn {
+  width: 100%;
+  padding: 12px;
+  font-size: 15px;
+  margin-top: 8px;
+}
+
+.login-error {
+  padding: 10px 14px;
+  background: rgba(214,48,49,0.08);
+  color: #d63031;
+  border-radius: 8px;
+  font-size: 13px;
+}
+
+/* === АДМИНКА === */
+.stat-card {
+  background: #fff;
+  border-radius: 12px;
+  padding: 24px;
+  text-align: center;
+  box-shadow: 0 2px 8px rgba(0,0,0,0.06);
+}
+
+.stat-value {
+  font-size: 32px;
+  font-weight: 700;
+  color: #6c5ce7;
+}
+
+.stat-label {
+  font-size: 13px;
+  color: #999;
+  margin-top: 4px;
+}
+
+.admin-table {
+  width: 100%;
+  border-collapse: collapse;
+  background: #fff;
+  border-radius: 12px;
+  overflow: hidden;
+  box-shadow: 0 2px 8px rgba(0,0,0,0.06);
+}
+
+.admin-table th {
+  padding: 12px 16px;
+  text-align: left;
+  font-size: 12px;
+  font-weight: 600;
+  color: #999;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  background: #fafafa;
+  border-bottom: 1px solid #e4e6eb;
+}
+
+.admin-table td {
+  padding: 12px 16px;
+  font-size: 13px;
+  border-bottom: 1px solid #f0f0f0;
+  color: #333;
+}
+
+.admin-table tr:hover td {
+  background: #fafafa;
+}
+
+/* Модалка */
+.modal-overlay {
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  background: rgba(0,0,0,0.5);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 1000;
+}
+
+.modal-card {
+  background: #fff;
+  border-radius: 16px;
+  padding: 32px;
+  width: 100%;
+  max-width: 480px;
+  box-shadow: 0 20px 60px rgba(0,0,0,0.3);
+}
+
+/* === НАВИГАЦИЯ === */
 .nav-tabs {
   display: flex;
-  border-bottom: 1px solid #e1e4e8;
+  border-bottom: 1px solid #e4e6eb;
   background: #fff;
 }
 
 .nav-tab {
   padding: 12px 20px;
   cursor: pointer;
-  font-size: 14px;
+  font-size: 13px;
   font-weight: 500;
-  color: #666;
+  color: #999;
   border-bottom: 2px solid transparent;
   transition: all 0.15s;
 }
 
 .nav-tab:hover {
-  color: #333;
+  color: #555;
 }
 
 .nav-tab.active {
-  color: #0984e3;
-  border-bottom-color: #0984e3;
+  color: #6c5ce7;
+  border-bottom-color: #6c5ce7;
+}
+
+/* === АДАПТИВНОСТЬ === */
+@media (max-width: 768px) {
+  .sidebar {
+    width: 100%;
+    height: auto;
+    max-height: 50vh;
+  }
+
+  .message {
+    max-width: 85%;
+  }
+
+  .main-header {
+    flex-direction: column;
+    gap: 8px;
+    align-items: flex-start;
+  }
+
+  .stat-card {
+    padding: 16px;
+  }
+
+  .stat-value {
+    font-size: 24px;
+  }
+
+  .admin-table {
+    font-size: 12px;
+  }
+
+  .admin-table th,
+  .admin-table td {
+    padding: 8px 10px;
+  }
+}
+
+/* === СКРОЛЛБАР === */
+::-webkit-scrollbar {
+  width: 6px;
+}
+
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+::-webkit-scrollbar-thumb {
+  background: rgba(0,0,0,0.15);
+  border-radius: 3px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: rgba(0,0,0,0.25);
+}
+
+.sidebar ::-webkit-scrollbar-thumb {
+  background: rgba(255,255,255,0.1);
+}
+
+.sidebar ::-webkit-scrollbar-thumb:hover {
+  background: rgba(255,255,255,0.2);
 }

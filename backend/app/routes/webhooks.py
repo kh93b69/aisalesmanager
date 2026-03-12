@@ -1,3 +1,4 @@
+import re
 from fastapi import APIRouter, Request
 from app.database import supabase
 from app.ai_engine import get_ai_response
@@ -7,6 +8,26 @@ from app.telegram import send_telegram_message, send_telegram_photo, set_webhook
 from app.config import BACKEND_URL
 
 router = APIRouter()
+
+
+def find_bot_images(bot_id: str) -> list:
+    """Находит все загруженные картинки бота из knowledge_chunks."""
+    try:
+        result = supabase.table("knowledge_chunks") \
+            .select("content") \
+            .eq("bot_id", bot_id) \
+            .like("content", "[IMAGE:%") \
+            .execute()
+
+        images = []
+        for item in result.data:
+            content = item["content"]
+            url = content.split("]")[0].replace("[IMAGE:", "")
+            name = content.split("] ")[-1] if "] " in content else "image"
+            images.append({"url": url, "name": name})
+        return images
+    except Exception:
+        return []
 
 
 def process_message(bot_id: str, chat_id: str, text: str, channel: str):
@@ -76,9 +97,18 @@ def process_message(bot_id: str, chat_id: str, text: str, channel: str):
     # Ищем релевантный контекст в базе знаний
     knowledge_context = search_knowledge(bot_id, text)
 
+    # Получаем список картинок бота
+    bot_images = find_bot_images(bot_id)
+
+    # Добавляем инфо о картинках в промпт
+    image_prompt = ""
+    if bot_images:
+        image_list = "\n".join([f"- {img['name']}: [IMAGE:{img['url']}]" for img in bot_images])
+        image_prompt = f"\n\nУ тебя есть картинки, которые можно отправить клиенту. Чтобы отправить картинку, вставь её тег в ответ.\nДоступные картинки:\n{image_list}\n\nВставляй картинку ТОЛЬКО если клиент спрашивает о товаре/услуге, к которой относится картинка."
+
     # Получаем ответ от ИИ
     ai_response = get_ai_response(
-        system_prompt=bot["system_prompt"],
+        system_prompt=bot["system_prompt"] + image_prompt,
         messages=messages,
         knowledge_context=knowledge_context,
     )
@@ -131,7 +161,6 @@ async def telegram_webhook(request: Request):
 
         if ai_response:
             # Проверяем, есть ли в ответе ссылки на картинки [IMAGE:url]
-            import re
             image_urls = re.findall(r'\[IMAGE:(https?://[^\]]+)\]', ai_response)
 
             # Убираем теги картинок из текста
@@ -148,11 +177,10 @@ async def telegram_webhook(request: Request):
         return {"status": "ok"}
 
     except Exception as error:
-        # Логируем ошибку и возвращаем детали (для отладки)
         import traceback
-        error_details = traceback.format_exc()
-        print(f"TELEGRAM WEBHOOK ERROR: {error_details}")
-        return {"status": "error", "detail": str(error), "traceback": error_details}
+        print(f"TELEGRAM WEBHOOK ERROR: {traceback.format_exc()}")
+        # Не возвращаем traceback клиенту — это дыра в безопасности
+        return {"status": "error", "detail": "Internal error"}
 
 
 @router.post("/api/setup-telegram-webhook")
@@ -168,34 +196,47 @@ async def setup_telegram_webhook():
 @router.post("/webhook/whatsapp")
 async def whatsapp_webhook(request: Request):
     """Принимает входящие сообщения от WhatsApp (через WAHA)."""
-    body = await request.json()
+    try:
+        body = await request.json()
 
-    if body.get("event") != "message":
-        return {"status": "ignored"}
+        if body.get("event") != "message":
+            return {"status": "ignored"}
 
-    message_data = body.get("payload", {})
-    chat_id = message_data.get("from", "")
-    text = message_data.get("body", "")
-    session = body.get("session", "default")
+        message_data = body.get("payload", {})
+        chat_id = message_data.get("from", "")
+        text = message_data.get("body", "")
+        session = body.get("session", "default")
 
-    if not text or not chat_id:
-        return {"status": "empty"}
+        # Игнорируем свои исходящие сообщения
+        if message_data.get("fromMe", False):
+            return {"status": "echo_ignored"}
 
-    # Находим бота по сессии WhatsApp
-    bot_result = supabase.table("bots") \
-        .select("*") \
-        .eq("whatsapp_session", session) \
-        .limit(1) \
-        .execute()
+        if not text or not chat_id:
+            return {"status": "empty"}
 
-    if not bot_result.data:
-        return {"status": "bot_not_found"}
+        # Находим бота по сессии WhatsApp
+        bot_result = supabase.table("bots") \
+            .select("*") \
+            .eq("whatsapp_session", session) \
+            .limit(1) \
+            .execute()
 
-    bot = bot_result.data[0]
+        if not bot_result.data:
+            return {"status": "bot_not_found"}
 
-    ai_response = process_message(bot["id"], chat_id, text, "whatsapp")
+        bot = bot_result.data[0]
 
-    if ai_response:
-        await send_whatsapp_message(chat_id, ai_response, session)
+        ai_response = process_message(bot["id"], chat_id, text, "whatsapp")
 
-    return {"status": "ok"}
+        if ai_response:
+            # Убираем теги картинок из текста (картинки пока только в Telegram)
+            clean_text = re.sub(r'\[IMAGE:https?://[^\]]+\]', '', ai_response).strip()
+            if clean_text:
+                await send_whatsapp_message(chat_id, clean_text, session)
+
+        return {"status": "ok"}
+
+    except Exception as error:
+        import traceback
+        print(f"WHATSAPP WEBHOOK ERROR: {traceback.format_exc()}")
+        return {"status": "error", "detail": "Internal error"}
