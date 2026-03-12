@@ -238,7 +238,8 @@ def get_images(bot_id: str, user: dict = Depends(get_current_user)):
 @router.post("/api/bots/{bot_id}/whatsapp/start")
 async def whatsapp_start(bot_id: str, user: dict = Depends(get_current_user)):
     """Запускает сессию WhatsApp для бота и настраивает webhook."""
-    session_name = f"bot_{bot_id}"
+    # WAHA Core поддерживает только сессию "default"
+    session_name = "default"
 
     try:
         # Запускаем сессию
@@ -263,7 +264,7 @@ async def whatsapp_start(bot_id: str, user: dict = Depends(get_current_user)):
 @router.post("/api/bots/{bot_id}/whatsapp/stop")
 async def whatsapp_stop(bot_id: str, user: dict = Depends(get_current_user)):
     """Останавливает сессию WhatsApp для бота."""
-    session_name = f"bot_{bot_id}"
+    session_name = "default"
     result = await stop_session(session_name)
 
     supabase.table("bots") \
@@ -278,7 +279,7 @@ async def whatsapp_stop(bot_id: str, user: dict = Depends(get_current_user)):
 @router.get("/api/bots/{bot_id}/whatsapp/status")
 async def whatsapp_status(bot_id: str, user: dict = Depends(get_current_user)):
     """Получает статус подключения WhatsApp."""
-    session_name = f"bot_{bot_id}"
+    session_name = "default"
     status = await get_session_status(session_name)
     return status
 
@@ -286,6 +287,6 @@ async def whatsapp_status(bot_id: str, user: dict = Depends(get_current_user)):
 @router.get("/api/bots/{bot_id}/whatsapp/qr")
 async def whatsapp_qr(bot_id: str, user: dict = Depends(get_current_user)):
     """Получает QR-код для подключения WhatsApp."""
-    session_name = f"bot_{bot_id}"
+    session_name = "default"
     qr_data = await get_qr_code(session_name)
     return qr_data
