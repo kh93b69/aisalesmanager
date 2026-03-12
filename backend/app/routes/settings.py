@@ -238,24 +238,26 @@ def get_images(bot_id: str, user: dict = Depends(get_current_user)):
 @router.post("/api/bots/{bot_id}/whatsapp/start")
 async def whatsapp_start(bot_id: str, user: dict = Depends(get_current_user)):
     """Запускает сессию WhatsApp для бота и настраивает webhook."""
-    # Используем bot_id как имя сессии
     session_name = f"bot_{bot_id}"
 
-    # Запускаем сессию
-    result = await start_session(session_name)
+    try:
+        # Запускаем сессию
+        result = await start_session(session_name)
 
-    # Настраиваем webhook для приёма сообщений
-    webhook_url = f"{BACKEND_URL}/webhook/whatsapp"
-    await waha_setup_webhook(session_name, webhook_url)
+        # Настраиваем webhook для приёма сообщений
+        webhook_url = f"{BACKEND_URL}/webhook/whatsapp"
+        await waha_setup_webhook(session_name, webhook_url)
 
-    # Сохраняем имя сессии в бота
-    supabase.table("bots") \
-        .update({"whatsapp_session": session_name}) \
-        .eq("id", bot_id) \
-        .eq("user_id", user["id"]) \
-        .execute()
+        # Сохраняем имя сессии в бота
+        supabase.table("bots") \
+            .update({"whatsapp_session": session_name}) \
+            .eq("id", bot_id) \
+            .eq("user_id", user["id"]) \
+            .execute()
 
-    return {"status": "started", "session": session_name, "result": result}
+        return {"status": "started", "session": session_name, "result": result}
+    except Exception as e:
+        return {"status": "error", "error": str(e)}
 
 
 @router.post("/api/bots/{bot_id}/whatsapp/stop")

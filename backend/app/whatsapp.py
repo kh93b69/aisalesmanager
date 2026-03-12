@@ -6,7 +6,7 @@ def _get_headers():
     """Возвращает заголовки для WAHA API."""
     headers = {"Content-Type": "application/json"}
     if WAHA_API_KEY:
-        headers["Authorization"] = f"Bearer {WAHA_API_KEY}"
+        headers["X-Api-Key"] = WAHA_API_KEY
     return headers
 
 
