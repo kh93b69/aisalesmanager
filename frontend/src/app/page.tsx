@@ -145,9 +145,20 @@ export default function Dashboard() {
     setEditPrompt(selectedBot.system_prompt);
     setEditName(selectedBot.name);
 
-    // Проверяем статус WhatsApp
+    // Проверяем статус WhatsApp при выборе бота
     setWaStatus("");
     setWaQr("");
+    authFetch(`${API_URL}/api/bots/${selectedBot.id}/whatsapp/status`)
+      .then((r) => r.json())
+      .then((data) => {
+        setWaStatus(data.status || "NOT_FOUND");
+        if (data.status === "SCAN_QR_CODE") {
+          authFetch(`${API_URL}/api/bots/${selectedBot.id}/whatsapp/qr`)
+            .then((r) => r.json())
+            .then((qrData) => { if (qrData.qr) setWaQr(qrData.qr); });
+        }
+      })
+      .catch(() => setWaStatus("NOT_FOUND"));
 
     // Загружаем картинки бота
     authFetch(`${API_URL}/api/bots/${selectedBot.id}/images`)
@@ -295,11 +306,17 @@ export default function Dashboard() {
     if (!selectedBot) return;
     setWaLoading(true);
     try {
-      await authFetch(`${API_URL}/api/bots/${selectedBot.id}/whatsapp/start`, { method: "POST" });
-      // Ждём немного и проверяем статус
-      setTimeout(() => checkWaStatus(), 2000);
+      const res = await authFetch(`${API_URL}/api/bots/${selectedBot.id}/whatsapp/start`, { method: "POST" });
+      const data = await res.json();
+      console.log("WhatsApp start result:", data);
+      setWaStatus("STARTING");
+
+      // Ждём 3 секунды и проверяем статус (WAHA нужно время на запуск)
+      await new Promise((r) => setTimeout(r, 3000));
+      await checkWaStatus();
     } catch (err) {
       console.error("Ошибка подключения WhatsApp:", err);
+      setWaStatus("ERROR");
     }
     setWaLoading(false);
   };
