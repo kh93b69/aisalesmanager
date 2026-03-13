@@ -249,7 +249,13 @@ async def whatsapp_start(bot_id: str, user: dict = Depends(get_current_user)):
         webhook_url = f"{BACKEND_URL}/webhook/whatsapp"
         await waha_setup_webhook(session_name, webhook_url)
 
-        # Сохраняем имя сессии в бота
+        # Убираем whatsapp_session у всех других ботов (WAHA Core — одна сессия)
+        supabase.table("bots") \
+            .update({"whatsapp_session": ""}) \
+            .eq("whatsapp_session", session_name) \
+            .execute()
+
+        # Устанавливаем сессию на выбранного бота
         supabase.table("bots") \
             .update({"whatsapp_session": session_name}) \
             .eq("id", bot_id) \

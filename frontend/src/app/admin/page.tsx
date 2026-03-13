@@ -56,7 +56,6 @@ export default function AdminPage() {
     const token = localStorage.getItem('access_token');
     if (!token) { router.push('/login'); return; }
 
-    // Проверяем что пользователь — админ
     const user = localStorage.getItem('user');
     if (user) {
       const parsed = JSON.parse(user);
@@ -115,9 +114,9 @@ export default function AdminPage() {
   return (
     <div style={{ padding: 32, maxWidth: 1200, margin: '0 auto' }}>
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 32 }}>
-        <h1>Админ-панель</h1>
+        <h1 style={{ fontSize: 24, fontWeight: 700 }}>Админ-панель</h1>
         <button className="btn btn-outline" onClick={() => router.push('/')}>
-          Назад к дашборду
+          Назад
         </button>
       </div>
 
@@ -144,7 +143,7 @@ export default function AdminPage() {
       )}
 
       {/* Таблица пользователей */}
-      <h2 style={{ marginBottom: 16 }}>Пользователи</h2>
+      <h2 style={{ marginBottom: 16, fontSize: 18, fontWeight: 600 }}>Пользователи</h2>
       <table className="admin-table">
         <thead>
           <tr>
@@ -161,7 +160,7 @@ export default function AdminPage() {
         <tbody>
           {users.map((u) => (
             <tr key={u.id}>
-              <td>{u.email}</td>
+              <td style={{ color: 'var(--text)' }}>{u.email}</td>
               <td>
                 <span className={`badge ${u.role === 'admin' ? 'badge-purple' : 'badge-green'}`}>
                   {u.role}
@@ -186,7 +185,7 @@ export default function AdminPage() {
                     Подписка
                   </button>
                   <button className="btn btn-sm btn-outline" onClick={() => toggleAdmin(u.id, u.role)}>
-                    {u.role === 'admin' ? 'Убрать админ' : 'Сделать админ'}
+                    {u.role === 'admin' ? 'User' : 'Admin'}
                   </button>
                   <button className="btn btn-sm btn-danger" onClick={() => deleteUser(u.id)}>
                     Удалить
@@ -202,7 +201,7 @@ export default function AdminPage() {
       {editingUser && (
         <div className="modal-overlay" onClick={() => setEditingUser(null)}>
           <div className="modal-card" onClick={(e) => e.stopPropagation()}>
-            <h3 style={{ marginBottom: 16 }}>Редактировать подписку</h3>
+            <h3>Редактировать подписку</h3>
 
             <div className="form-group">
               <label>План</label>

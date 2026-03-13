@@ -34,12 +34,8 @@ export default function LoginPage() {
 
       if (data.access_token) {
         localStorage.setItem('access_token', data.access_token);
-        if (data.refresh_token) {
-          localStorage.setItem('refresh_token', data.refresh_token);
-        }
-        if (data.user) {
-          localStorage.setItem('user', JSON.stringify(data.user));
-        }
+        if (data.refresh_token) localStorage.setItem('refresh_token', data.refresh_token);
+        if (data.user) localStorage.setItem('user', JSON.stringify(data.user));
         router.push('/');
       } else {
         setError(data.message || 'Проверьте email для подтверждения');
@@ -55,8 +51,17 @@ export default function LoginPage() {
     <div className="login-page">
       <div className="login-card">
         <div className="login-logo">
+          <div style={{
+            width: 56, height: 56, borderRadius: 14,
+            background: 'linear-gradient(135deg, var(--primary), #8b5cf6)',
+            display: 'flex', alignItems: 'center', justifyContent: 'center',
+            fontSize: 24, fontWeight: 700, color: '#fff',
+            margin: '0 auto 16px',
+          }}>
+            AI
+          </div>
           <h1>AI Sales Manager</h1>
-          <p>Управление ИИ-менеджерами для мессенджеров</p>
+          <p>ИИ-менеджеры для мессенджеров</p>
         </div>
 
         <div className="login-tabs">

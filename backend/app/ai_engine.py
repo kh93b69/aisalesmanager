@@ -13,7 +13,17 @@ def get_ai_response(system_prompt: str, messages: list, knowledge_context: str =
     # Если есть контекст из базы знаний, добавляем его в системный промпт
     full_system_prompt = system_prompt
     if knowledge_context:
-        full_system_prompt += f"\n\n--- БАЗА ЗНАНИЙ ---\n{knowledge_context}\n--- КОНЕЦ БАЗЫ ЗНАНИЙ ---\n\nИспользуй информацию из базы знаний для ответа. Отвечай точными данными из базы знаний (цены, названия, характеристики). Если в базе знаний нет нужной информации, честно скажи что нужно уточнить."
+        full_system_prompt += (
+            "\n\n--- БАЗА ЗНАНИЙ ---\n"
+            f"{knowledge_context}\n"
+            "--- КОНЕЦ БАЗЫ ЗНАНИЙ ---\n\n"
+            "ВАЖНЫЕ ПРАВИЛА:\n"
+            "- Используй ТОЛЬКО данные из базы знаний: цены, названия, характеристики.\n"
+            "- Если клиент спрашивает о товаре/услуге из базы — отвечай точными данными.\n"
+            "- Если в базе знаний нет информации по вопросу — честно скажи, что нужно уточнить у менеджера.\n"
+            "- НЕ придумывай цены, характеристики и факты, которых нет в базе знаний.\n"
+            "- Отвечай кратко и по делу, как опытный менеджер по продажам."
+        )
 
     # Формируем сообщения для OpenAI API
     openai_messages = [{"role": "system", "content": full_system_prompt}]
@@ -28,11 +38,12 @@ def get_ai_response(system_prompt: str, messages: list, knowledge_context: str =
                 "Content-Type": "application/json",
             },
             json={
-                "model": "gpt-4o-mini",
+                "model": "gpt-4o",
                 "messages": openai_messages,
-                "max_tokens": 1024,
+                "max_tokens": 2048,
+                "temperature": 0.7,
             },
-            timeout=30,
+            timeout=60,
         )
 
         data = response.json()

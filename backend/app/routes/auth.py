@@ -51,8 +51,8 @@ def signup(data: AuthRequest):
 
     except HTTPException:
         raise
-    except Exception as e:
-        raise HTTPException(status_code=400, detail=str(e))
+    except Exception:
+        raise HTTPException(status_code=400, detail="Ошибка регистрации. Возможно, этот email уже зарегистрирован.")
 
 
 @router.post("/api/auth/login")
