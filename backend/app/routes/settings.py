@@ -14,6 +14,15 @@ from app.config import BACKEND_URL
 router = APIRouter()
 
 
+def _check_bot_ownership(bot_id: str, user_id: str):
+    """Проверяет что бот принадлежит текущему пользователю."""
+    from fastapi import HTTPException
+    bot = supabase.table("bots").select("id").eq("id", bot_id).eq("user_id", user_id).limit(1).execute()
+    if not bot.data:
+        raise HTTPException(status_code=403, detail="Нет доступа к этому боту")
+    return bot.data[0]
+
+
 @router.get("/api/bots")
 def get_bots(user: dict = Depends(get_current_user)):
     """Получает список ботов текущего пользователя."""
@@ -24,10 +33,36 @@ def get_bots(user: dict = Depends(get_current_user)):
 @router.post("/api/bots")
 def create_bot(data: dict, user: dict = Depends(get_current_user)):
     """Создаёт нового бота для текущего пользователя."""
+    from fastapi import HTTPException
+
+    # Проверяем лимит ботов по подписке
+    sub = supabase.table("subscriptions") \
+        .select("max_bots, status") \
+        .eq("user_id", user["id"]) \
+        .limit(1) \
+        .execute()
+
+    max_bots = 1  # По умолчанию для бесплатного плана
+    if sub.data:
+        if sub.data[0].get("status") != "active":
+            raise HTTPException(status_code=403, detail="Подписка неактивна")
+        max_bots = sub.data[0].get("max_bots", 1)
+
+    current_bots = supabase.table("bots") \
+        .select("id") \
+        .eq("user_id", user["id"]) \
+        .execute()
+
+    if len(current_bots.data) >= max_bots:
+        raise HTTPException(
+            status_code=403,
+            detail=f"Достигнут лимит ботов ({max_bots}). Обновите подписку."
+        )
+
     result = supabase.table("bots").insert({
         "name": data.get("name", "Новый бот"),
         "system_prompt": data.get("system_prompt", ""),
-        "whatsapp_session": data.get("whatsapp_session", "default"),
+        "whatsapp_session": "",
         "user_id": user["id"],
     }).execute()
 
@@ -144,6 +179,7 @@ async def upload_knowledge(bot_id: str, file: UploadFile = File(...), user: dict
     Поддерживаемые форматы: TXT, PDF, CSV, XLSX.
     Разбивает на чанки и сохраняет в таблицу knowledge_chunks.
     """
+    _check_bot_ownership(bot_id, user["id"])
     content = await file.read()
     filename = file.filename.lower() if file.filename else ""
 
@@ -174,10 +210,11 @@ async def upload_knowledge(bot_id: str, file: UploadFile = File(...), user: dict
                 chunks.append({"bot_id": bot_id, "content": chunk})
 
     if chunks:
-        # Удаляем старые чанки этого бота
+        # Удаляем старые текстовые чанки (НЕ картинки)
         supabase.table("knowledge_chunks") \
             .delete() \
             .eq("bot_id", bot_id) \
+            .not_.like("content", "[IMAGE:%") \
             .execute()
 
         # Вставляем новые
@@ -192,6 +229,7 @@ async def upload_image(bot_id: str, file: UploadFile = File(...), user: dict = D
     Загружает картинку в Supabase Storage для бота.
     Бот сможет отправлять её клиентам.
     """
+    _check_bot_ownership(bot_id, user["id"])
     content = await file.read()
     filename = file.filename or "image.jpg"
 
@@ -216,6 +254,7 @@ async def upload_image(bot_id: str, file: UploadFile = File(...), user: dict = D
 @router.get("/api/bots/{bot_id}/images")
 def get_images(bot_id: str, user: dict = Depends(get_current_user)):
     """Получает список загруженных картинок бота."""
+    _check_bot_ownership(bot_id, user["id"])
     result = supabase.table("knowledge_chunks") \
         .select("id, content") \
         .eq("bot_id", bot_id) \

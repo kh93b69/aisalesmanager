@@ -1,11 +1,13 @@
 import re
+import hmac
+import hashlib
 from fastapi import APIRouter, Request
 from app.database import supabase
 from app.ai_engine import get_ai_response
 from app.rag import search_knowledge
 from app.whatsapp import send_whatsapp_message
 from app.telegram import send_telegram_message, send_telegram_photo, set_webhook
-from app.config import BACKEND_URL
+from app.config import BACKEND_URL, TELEGRAM_BOT_TOKEN, WAHA_API_KEY
 
 router = APIRouter()
 
@@ -30,7 +32,7 @@ def find_bot_images(bot_id: str) -> list:
         return []
 
 
-def process_message(bot_id: str, chat_id: str, text: str, channel: str):
+async def process_message(bot_id: str, chat_id: str, text: str, channel: str):
     """
     Общая логика обработки входящего сообщения.
     Работает одинаково для WhatsApp, Telegram и других каналов.
@@ -68,6 +70,29 @@ def process_message(bot_id: str, chat_id: str, text: str, channel: str):
 
     # Создаём диалог, если его нет
     if not dialog_result.data:
+        # Проверяем лимит диалогов по подписке
+        user_id = bot.get("user_id")
+        if user_id:
+            sub = supabase.table("subscriptions") \
+                .select("max_dialogs_per_month") \
+                .eq("user_id", user_id) \
+                .limit(1) \
+                .execute()
+
+            max_dialogs = 100  # По умолчанию для бесплатного плана
+            if sub.data:
+                max_dialogs = sub.data[0].get("max_dialogs_per_month", 100)
+
+            # Считаем текущие диалоги за месяц у всех ботов пользователя
+            user_bots = supabase.table("bots").select("id").eq("user_id", user_id).execute()
+            total_dialogs = 0
+            for ub in user_bots.data:
+                d = supabase.table("dialogs").select("id").eq("bot_id", ub["id"]).execute()
+                total_dialogs += len(d.data)
+
+            if total_dialogs >= max_dialogs:
+                return "Извините, менеджер временно недоступен. Попробуйте позже."
+
         new_dialog = supabase.table("dialogs").insert({
             "bot_id": bot_id,
             "chat_id": chat_id,
@@ -106,8 +131,8 @@ def process_message(bot_id: str, chat_id: str, text: str, channel: str):
         image_list = "\n".join([f"- {img['name']}: [IMAGE:{img['url']}]" for img in bot_images])
         image_prompt = f"\n\nУ тебя есть картинки, которые можно отправить клиенту. Чтобы отправить картинку, вставь её тег в ответ.\nДоступные картинки:\n{image_list}\n\nВставляй картинку ТОЛЬКО если клиент спрашивает о товаре/услуге, к которой относится картинка."
 
-    # Получаем ответ от ИИ
-    ai_response = get_ai_response(
+    # Получаем ответ от ИИ (async)
+    ai_response = await get_ai_response(
         system_prompt=bot["system_prompt"] + image_prompt,
         messages=messages,
         knowledge_context=knowledge_context,
@@ -129,6 +154,12 @@ def process_message(bot_id: str, chat_id: str, text: str, channel: str):
 async def telegram_webhook(request: Request):
     """Принимает входящие сообщения от Telegram."""
     try:
+        # Проверяем секретный токен Telegram (если установлен)
+        secret = request.headers.get("X-Telegram-Bot-Api-Secret-Token", "")
+        expected_secret = hashlib.sha256(TELEGRAM_BOT_TOKEN.encode()).hexdigest()[:32]
+        if TELEGRAM_BOT_TOKEN and secret and secret != expected_secret:
+            return {"status": "unauthorized"}
+
         body = await request.json()
 
         # Telegram отправляет объект Update
@@ -146,18 +177,30 @@ async def telegram_webhook(request: Request):
         if text.startswith("/"):
             return {"status": "command_ignored"}
 
-        # Находим бота по telegram_token (для MVP — берём первого бота)
+        # Находим бота с привязанным Telegram
+        # Ищем бота у которого telegram_enabled = true
         bot_result = supabase.table("bots") \
             .select("*") \
+            .eq("telegram_enabled", True) \
+            .order("created_at", desc=True) \
             .limit(1) \
             .execute()
+
+        if not bot_result.data:
+            # Fallback: берём последнего обновлённого бота с системным промптом
+            bot_result = supabase.table("bots") \
+                .select("*") \
+                .neq("system_prompt", "") \
+                .order("created_at", desc=True) \
+                .limit(1) \
+                .execute()
 
         if not bot_result.data:
             return {"status": "bot_not_found"}
 
         bot = bot_result.data[0]
 
-        ai_response = process_message(bot["id"], chat_id, text, "telegram")
+        ai_response = await process_message(bot["id"], chat_id, text, "telegram")
 
         if ai_response:
             # Проверяем, есть ли в ответе ссылки на картинки [IMAGE:url]
@@ -185,9 +228,10 @@ async def telegram_webhook(request: Request):
 
 @router.post("/api/setup-telegram-webhook")
 async def setup_telegram_webhook():
-    """Устанавливает webhook Telegram на текущий сервер."""
+    """Устанавливает webhook Telegram на текущий сервер с секретным токеном."""
     webhook_url = f"{BACKEND_URL}/webhook/telegram"
-    result = await set_webhook(webhook_url)
+    secret_token = hashlib.sha256(TELEGRAM_BOT_TOKEN.encode()).hexdigest()[:32]
+    result = await set_webhook(webhook_url, secret_token=secret_token)
     return {"webhook_url": webhook_url, "telegram_response": result}
 
 
@@ -197,6 +241,12 @@ async def setup_telegram_webhook():
 async def whatsapp_webhook(request: Request):
     """Принимает входящие сообщения от WhatsApp (через WAHA)."""
     try:
+        # Проверяем API ключ WAHA (если задан)
+        if WAHA_API_KEY:
+            api_key = request.headers.get("X-Api-Key", "")
+            if api_key != WAHA_API_KEY:
+                return {"status": "unauthorized"}
+
         body = await request.json()
 
         if body.get("event") != "message":
@@ -227,7 +277,7 @@ async def whatsapp_webhook(request: Request):
 
         bot = bot_result.data[0]
 
-        ai_response = process_message(bot["id"], chat_id, text, "whatsapp")
+        ai_response = await process_message(bot["id"], chat_id, text, "whatsapp")
 
         if ai_response:
             # Убираем теги картинок из текста (картинки пока только в Telegram)

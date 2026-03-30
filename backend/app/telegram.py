@@ -42,15 +42,18 @@ async def send_telegram_photo(chat_id: int, photo_url: str, caption: str = "") -
         return response.json()
 
 
-async def set_webhook(webhook_url: str) -> dict:
+async def set_webhook(webhook_url: str, secret_token: str = "") -> dict:
     """
     Устанавливает webhook для Telegram бота.
     Вызывается один раз при настройке.
 
     webhook_url — полный URL, например: https://your-app.railway.app/webhook/telegram
+    secret_token — секретный токен для проверки подлинности запросов
     """
     url = f"{TELEGRAM_API}/setWebhook"
     payload = {"url": webhook_url}
+    if secret_token:
+        payload["secret_token"] = secret_token
 
     async with httpx.AsyncClient() as http_client:
         response = await http_client.post(url, json=payload)

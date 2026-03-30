@@ -2,7 +2,7 @@ import httpx
 from app.config import OPENAI_API_KEY
 
 
-def get_ai_response(system_prompt: str, messages: list, knowledge_context: str = "") -> str:
+async def get_ai_response(system_prompt: str, messages: list, knowledge_context: str = "") -> str:
     """
     Отправляет сообщение в OpenAI GPT и получает ответ.
 
@@ -30,25 +30,25 @@ def get_ai_response(system_prompt: str, messages: list, knowledge_context: str =
     openai_messages.extend(messages)
 
     try:
-        # Запрос к OpenAI API напрямую через httpx (без SDK — меньше зависимостей)
-        response = httpx.post(
-            "https://api.openai.com/v1/chat/completions",
-            headers={
-                "Authorization": f"Bearer {OPENAI_API_KEY}",
-                "Content-Type": "application/json",
-            },
-            json={
-                "model": "gpt-4o",
-                "messages": openai_messages,
-                "max_tokens": 2048,
-                "temperature": 0.7,
-            },
-            timeout=60,
-        )
+        # Асинхронный запрос — не блокирует event loop
+        async with httpx.AsyncClient() as client:
+            response = await client.post(
+                "https://api.openai.com/v1/chat/completions",
+                headers={
+                    "Authorization": f"Bearer {OPENAI_API_KEY}",
+                    "Content-Type": "application/json",
+                },
+                json={
+                    "model": "gpt-4o",
+                    "messages": openai_messages,
+                    "max_tokens": 2048,
+                    "temperature": 0.7,
+                },
+                timeout=60,
+            )
 
         data = response.json()
 
-        # Проверяем наличие ошибки в ответе
         if "error" in data:
             print(f"OPENAI API ERROR: {data['error']}")
             return "Извините, произошла техническая ошибка. Попробуйте позже."

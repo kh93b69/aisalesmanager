@@ -3,19 +3,24 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse
-from app.config import FRONTEND_URL
+from app.config import FRONTEND_URL, BACKEND_URL
 from app.routes import webhooks, dialogs, settings, auth, admin
 
 app = FastAPI(title="AI Sales Manager API")
 
-# Разрешаем запросы с фронтенда
+# Разрешаем запросы с фронтенда и бэкенда (SPA раздаётся бэкендом)
+allowed_origins = [
+    "http://localhost:3000",
+    "http://localhost:3001",
+]
+if FRONTEND_URL:
+    allowed_origins.append(FRONTEND_URL)
+if BACKEND_URL:
+    allowed_origins.append(BACKEND_URL)
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[
-        FRONTEND_URL,
-        "http://localhost:3000",
-        "http://localhost:3001",
-    ],
+    allow_origins=allowed_origins,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
