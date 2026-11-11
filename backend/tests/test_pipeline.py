@@ -255,7 +255,7 @@ def make_env(monkeypatch, dialog, ai_results, bot_extra=None, fresh_dialog=None,
     monkeypatch.setattr(pipeline, "find_bot_images", lambda bot_id: [])
     monkeypatch.setattr(pipeline, "build_system_blocks", lambda *a: [{"type": "text", "text": "s"}])
 
-    def fake_state_note(d, c, n, has_cities=True):
+    def fake_state_note(d, c, n, has_cities=True, is_first_reply=False):
         calls["state_note"].append(has_cities)
         return "note"
 

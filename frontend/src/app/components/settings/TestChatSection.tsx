@@ -49,6 +49,11 @@ function ReplyInfo({ info }: { info: TestChatReply }) {
           ⚠️ Нужен менеджер{info.need_human_reason ? `: ${info.need_human_reason}` : ""}
         </span>
       )}
+      {info.unknown_question && (
+        <span className="test-chat-tag test-chat-tag-warn">
+          ❓ Нет в базе знаний: {info.unknown_question} (в WhatsApp руководителю придёт уведомление)
+        </span>
+      )}
       {info.client_name && <span className="test-chat-tag">👤 {info.client_name}</span>}
       {!info.ok && <span className="test-chat-tag test-chat-tag-warn">ИИ не ответил — показан запасной текст</span>}
       <span className="test-chat-tokens">

@@ -1,5 +1,5 @@
 """
-Планировщик напоминаний о счёте.
+Планировщик: напоминания о счёте и дожимы (followups.py).
 
 Раз в минуту смотрим горячие диалоги (status='hot'). Если сотрудник не ответил клиенту:
 - через N минут после hot_at — напоминание ответственным;
@@ -14,6 +14,7 @@ from datetime import datetime, timezone
 
 from app.database import supabase
 from app.notifier import notify_reminder
+from app.followups import check_followups_once
 
 # Размер страницы при выборке диалогов (PostgREST отдаёт не больше 1000 строк)
 PAGE_SIZE = 500
@@ -175,4 +176,11 @@ async def run_scheduler_forever() -> None:
             raise
         except Exception as error:
             print(f"SCHEDULER ERROR: {error}")
+        # Дожимы клиентам, которые замолчали (см. followups.py)
+        try:
+            await check_followups_once()
+        except asyncio.CancelledError:
+            raise
+        except Exception as error:
+            print(f"SCHEDULER ERROR: дожимы: {error}")
         await asyncio.sleep(CHECK_INTERVAL_SECONDS)

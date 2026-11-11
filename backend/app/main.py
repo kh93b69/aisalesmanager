@@ -8,7 +8,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse
 from app.config import FRONTEND_URL, BACKEND_URL
-from app.routes import webhooks, dialogs, settings, auth, admin, test_chat
+from app.routes import webhooks, dialogs, settings, auth, admin, test_chat, questions
 from app.scheduler import run_scheduler_forever
 from app.pipeline import recover_unanswered_dialogs
 
@@ -88,6 +88,7 @@ app.include_router(dialogs.router)
 app.include_router(settings.router)
 app.include_router(admin.router)
 app.include_router(test_chat.router)
+app.include_router(questions.router)
 
 
 @app.get("/api/health")

@@ -1729,3 +1729,83 @@ code {
   font-size: 11px;
   color: var(--text-muted);
 }
+
+
+/* ---------- Скрипты и дожимы ---------- */
+.link-row {
+  display: grid;
+  grid-template-columns: 1fr 1.4fr 1.6fr auto;
+  gap: 8px;
+  margin-bottom: 8px;
+  align-items: center;
+}
+.checkbox-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  cursor: pointer;
+  margin: 8px 0;
+  font-weight: 500;
+}
+.checkbox-row input { width: auto; }
+.followup-step {
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 12px;
+  margin: 10px 0;
+}
+.followup-step-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 8px;
+  flex-wrap: wrap;
+}
+.followup-step-head .btn { margin-left: auto; }
+.followup-hours { width: 80px !important; }
+
+/* ---------- Вопросы без ответа ---------- */
+.question-tabs {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin-bottom: 14px;
+}
+.question-card {
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 12px 14px;
+  margin-bottom: 10px;
+}
+.question-head {
+  display: flex;
+  justify-content: space-between;
+  gap: 8px;
+}
+.question-text { font-weight: 600; }
+.question-meta, .question-client {
+  color: var(--text-muted);
+  font-size: 13px;
+  margin-top: 4px;
+}
+.question-answer { margin-top: 10px; }
+.question-options { margin: 4px 0 8px; }
+.question-saved {
+  margin-top: 8px;
+  color: var(--success);
+  white-space: pre-wrap;
+}
+
+@media (max-width: 760px) {
+  .link-row { grid-template-columns: 1fr; }
+  .link-row .btn { justify-self: start; }
+}
+.followup-step textarea,
+.question-answer textarea {
+  width: 100%;
+  resize: vertical;
+  line-height: 1.5;
+}
+.link-row .input { width: 100%; }
+.question-meta a { color: var(--primary); }
+.checkbox-row { font-size: 14px; }

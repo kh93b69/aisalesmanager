@@ -15,7 +15,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Проект
 
-AI Sales Manager — сервис ИИ-менеджеров продаж в WhatsApp (через Wazzup) для малого и среднего бизнеса. Бот консультирует по базе знаний, ведёт клиента к целевому действию и передаёт «горячих» клиентов сотрудникам (счёт/заказ оформляет человек). Промпт собирается из анкеты компании (тип бизнеса general/clinic, название, описание, целевое действие); для сетей в нескольких городах бот выясняет город и отвечает по базе этого города. В настройках есть «Тест бота» — переписка с ботом без WhatsApp.
+AI Sales Manager — сервис ИИ-менеджеров продаж в WhatsApp (через Wazzup) для малого и среднего бизнеса. Бот консультирует по базе знаний, ведёт клиента к целевому действию и передаёт «горячих» клиентов сотрудникам (счёт/заказ оформляет человек). Промпт собирается из анкеты компании (тип бизнеса general/clinic, название, описание, целевое действие); для сетей в нескольких городах бот выясняет город и отвечает по базе этого города. В настройках есть «Тест бота» — переписка с ботом без WhatsApp, «Скрипты и дожимы» (приветствие, скрипт продаж, ссылки, напоминания замолчавшим клиентам) и «❓ Без ответа» — вопросы, на которые бот не нашёл ответа в базе знаний (руководитель отвечает → ответ добавляется в базу знаний).
 
 ## Стек
 
@@ -65,7 +65,8 @@ backend/app/
   wazzup.py       — клиент Wazzup API (каналы, вебхук, отправка)
   messenger.py    — отправка клиенту в нужный канал (WhatsApp/Telegram), теги [IMAGE:url]
   notifier.py     — уведомления в Telegram (горячий клиент, напоминания, внимание)
-  scheduler.py    — напоминания о счёте (каждые 60 с)
+  scheduler.py    — напоминания о счёте и дожимы (каждые 60 с)
+  followups.py    — дожимы: напоминания клиентам, которые замолчали после ответа бота
   transcribe.py   — расшифровка голосовых
   telegram.py     — Telegram Bot API (канал для клиентов)
   routes/
@@ -73,6 +74,7 @@ backend/app/
     dialogs.py    — диалоги, статусы сделки, отправка сообщения сотрудником, статистика
     settings.py   — боты (анкета компании), Wazzup, города, база знаний, картинки, команда, уведомления
     test_chat.py  — тестовый чат с ботом из панели (ничего не сохраняет и не отправляет)
+    questions.py  — вопросы без ответа: список, ответ (→ база знаний, по желанию клиенту), скрыть/удалить
     auth.py, admin.py
 
 frontend/src/app/
@@ -83,12 +85,13 @@ frontend/src/app/
 
 ## Таблицы Supabase
 
-- **bots** — настройки бота: анкета (business_type, company_name, assistant_name, business_description, target_action), system_prompt, ai_model, wazzup_* (ключ и секрет не отдаются на фронт), уведомления
+- **bots** — настройки бота: анкета (business_type, company_name, assistant_name, business_description, target_action), скрипты (greeting_message, sales_script, links), дожимы (followups_enabled, followups), system_prompt, ai_model, wazzup_* (ключ и секрет не отдаются на фронт), уведомления
 - **cities** — города/филиалы бота (name, aliases, address, telegram_chat_id)
 - **team_members** — сотрудники бота (user_id, city_id — NULL = все города)
-- **dialogs** — диалоги: city_id, status (new → in_progress → hot → invoice_sent → paid / lost), ai_disabled, needs_attention, hot_at…
+- **dialogs** — диалоги: city_id, status (new → in_progress → hot → invoice_sent → paid / lost), ai_disabled, needs_attention, hot_at, followup_count…
 - **messages** — сообщения (role: user / assistant / manager, external_id — защита от дублей)
-- **knowledge_chunks** — фрагменты базы знаний (city_id NULL = общая)
+- **knowledge_chunks** — фрагменты базы знаний (city_id NULL = общая; «[IMAGE:…]» — картинки, «[ВОПРОС-ОТВЕТ]» — ответы руководителя, не удаляются при загрузке файла)
+- **unanswered_questions** — вопросы, на которые бот не знал ответа (open / answered / dismissed)
 - **users**, **subscriptions** — аккаунты и лимиты
 
 ## Переменные окружения

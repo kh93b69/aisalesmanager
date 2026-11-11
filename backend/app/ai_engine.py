@@ -49,6 +49,7 @@ def build_reply_schema(city_names: list[str]) -> dict:
             "need_human": {"type": "boolean"},
             "need_human_reason": {"type": "string"},
             "client_name": {"type": "string"},
+            "unknown_question": {"type": "string"},
         },
         "required": [
             "reply",
@@ -58,6 +59,7 @@ def build_reply_schema(city_names: list[str]) -> dict:
             "need_human",
             "need_human_reason",
             "client_name",
+            "unknown_question",
         ],
         "additionalProperties": False,
     }
@@ -130,6 +132,7 @@ def make_fallback(reason: str, usage: dict | None = None) -> dict:
         "need_human": True,
         "need_human_reason": reason,
         "client_name": "",
+        "unknown_question": "",
         "ok": False,
         "usage": usage or empty_usage(),
     }
@@ -193,6 +196,8 @@ def parse_response(response, city_names: list[str]) -> dict:
         "need_human": need_human,
         "need_human_reason": need_human_reason,
         "client_name": str(data.get("client_name") or "").strip(),
+        # Вопрос без ответа в базе знаний — не длиннее 500 символов
+        "unknown_question": str(data.get("unknown_question") or "").strip()[:500],
         "ok": True,
         "usage": usage,
     }
@@ -205,7 +210,7 @@ async def generate_reply(bot: dict, system_blocks: list[dict], history: list[dic
 
     history — [{"role": "user"|"assistant", "content": str}], первая и последняя реплики — user.
     Возвращает dict: reply, detected_city, lead_status, lead_summary, need_human,
-    need_human_reason, client_name, ok, usage. Никогда не бросает исключений.
+    need_human_reason, client_name, unknown_question, ok, usage. Никогда не бросает исключений.
     """
     bot_id = bot.get("id")
 

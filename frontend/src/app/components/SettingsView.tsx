@@ -12,6 +12,8 @@ import ImagesSection from "./settings/ImagesSection";
 import TeamSection from "./settings/TeamSection";
 import NotificationsSection from "./settings/NotificationsSection";
 import TestChatSection from "./settings/TestChatSection";
+import ScriptsSection from "./settings/ScriptsSection";
+import QuestionsSection from "./settings/QuestionsSection";
 
 type Props = {
   bot: Bot;
@@ -25,6 +27,8 @@ const SECTIONS = [
   { key: "general", label: "О компании и ИИ" },
   { key: "cities", label: "Города" },
   { key: "knowledge", label: "База знаний" },
+  { key: "scripts", label: "Скрипты и дожимы" },
+  { key: "questions", label: "❓ Без ответа" },
   { key: "images", label: "Картинки" },
   { key: "team", label: "Команда" },
   { key: "notifications", label: "Уведомления" },
@@ -39,7 +43,7 @@ export default function SettingsView({ bot, cities, onBotUpdated, onCitiesChange
       <div className="page-header">
         <div>
           <h1>Настройки бота «{bot.name}»</h1>
-          <p>WhatsApp, анкета компании, база знаний, команда, уведомления и проверка бота</p>
+          <p>WhatsApp, анкета компании, база знаний, скрипты и дожимы, вопросы без ответа, команда и проверка бота</p>
         </div>
       </div>
 
@@ -57,6 +61,8 @@ export default function SettingsView({ bot, cities, onBotUpdated, onCitiesChange
         {section === "general" && <GeneralSection bot={bot} onBotUpdated={onBotUpdated} />}
         {section === "cities" && <CitiesSection bot={bot} cities={cities} onCitiesChanged={onCitiesChanged} />}
         {section === "knowledge" && <KnowledgeSection bot={bot} cities={cities} onCitiesChanged={onCitiesChanged} />}
+        {section === "scripts" && <ScriptsSection bot={bot} onBotUpdated={onBotUpdated} />}
+        {section === "questions" && <QuestionsSection bot={bot} />}
         {section === "images" && <ImagesSection bot={bot} />}
         {section === "team" && <TeamSection bot={bot} cities={cities} />}
         {section === "notifications" && <NotificationsSection bot={bot} onBotUpdated={onBotUpdated} />}

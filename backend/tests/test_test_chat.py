@@ -35,8 +35,8 @@ def make_client(monkeypatch, user_id="owner", answers=None, subscription={"statu
     calls = []
     queue = list(answers or [])
 
-    async def fake_build_and_generate(bot, dialog, cities, city, history, query):
-        calls.append({"city": city["name"] if city else None, "history": history, "query": query,
+    async def fake_build_and_generate(bot, dialog, cities, city, history, query, is_first_reply=False):
+        calls.append({"city": city["name"] if city else None, "history": history, "query": query, "first": is_first_reply,
                       "dialog": dialog})
         return queue.pop(0)
 

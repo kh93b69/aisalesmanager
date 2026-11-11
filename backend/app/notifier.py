@@ -292,6 +292,23 @@ async def notify_attention(bot: dict, dialog: dict, city: dict | None, team: lis
     return await _send_to_all(recipients, text_html, "нужен менеджер")
 
 
+async def notify_unknown_question(bot: dict, dialog: dict, city: dict | None, team: list[dict],
+                                  question: str) -> bool:
+    """
+    «❓ Бот не знает ответа» — руководителю (общий чат бота и чат города).
+    Руководитель отвечает в панели (Настройки → «Без ответа») — ответ попадает в базу знаний.
+    """
+    lines = [f"❓ <b>Бот не знает ответа:</b> {html.escape(_short(question, 500))}"]
+    lines += _client_lines(dialog, city)
+    lines.append("Клиенту сказали, что уточните и вернётесь с ответом.")
+    lines.append("Ответьте в панели: Настройки → «❓ Без ответа» — бот запомнит ответ.")
+    lines.append(_link_line(dialog))
+    text_html = "\n".join(lines)
+
+    recipients = get_recipients(bot, city, team, (dialog or {}).get("assigned_user_id"), escalation=True)
+    return await _send_to_all(recipients, text_html, "вопрос без ответа")
+
+
 async def notify_text(bot: dict, text_html: str) -> bool:
     """Служебное уведомление (сбои отправки, лимиты) — в общий чат бота. True — если доставлено."""
     chat_id = _clean_id((bot or {}).get("telegram_notify_chat_id"))

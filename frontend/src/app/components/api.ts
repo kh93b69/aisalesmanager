@@ -25,6 +25,14 @@ export type Bot = {
   assistant_name: string;
   business_description: string;
   target_action: string;
+  // Скрипты: первое сообщение и скрипт продаж (ответы на возражения)
+  greeting_message: string;
+  sales_script: string;
+  // Ссылки, которые бот отправляет по ситуации
+  links: BotLink[];
+  // Дожимы клиентов, которые замолчали
+  followups_enabled: boolean;
+  followups: FollowupStep[];
   telegram_notify_chat_id: string | null;
   invoice_reminder_minutes: number;
   assignment_mode: AssignmentMode;
@@ -36,6 +44,38 @@ export type Bot = {
   my_role: "owner" | "manager";
   // Город сотрудника (null — видит все города)
   my_city_id: string | null;
+};
+
+// Ссылка для бота: название, адрес и когда её отправлять
+export type BotLink = {
+  title: string;
+  url: string;
+  when: string;
+};
+
+// Шаг дожима: через сколько часов после последнего сообщения и что написать ("" — ИИ напишет сам)
+export type FollowupStep = {
+  hours: number;
+  text: string;
+};
+
+// Вопрос, на который бот не знал ответа (раздел «Без ответа»)
+export type QuestionStatus = "open" | "answered" | "dismissed";
+
+export type UnansweredQuestion = {
+  id: string;
+  bot_id: string;
+  dialog_id: string | null;
+  city_id: string | null;
+  city_name: string | null;
+  question: string;
+  client_message: string;
+  status: QuestionStatus;
+  answer: string;
+  created_at: string;
+  answered_at: string | null;
+  contact_name: string | null;
+  chat_id: string | null;
 };
 
 export type Dialog = {
@@ -368,6 +408,8 @@ export type TestChatReply = {
   need_human: boolean;
   need_human_reason: string;
   client_name: string;
+  // Вопрос, на который нет ответа в базе знаний ("" — всё знал)
+  unknown_question: string;
   ok: boolean;
   model: string;
   usage: {

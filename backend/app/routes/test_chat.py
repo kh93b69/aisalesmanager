@@ -149,7 +149,12 @@ async def test_chat(bot_id: str, data: dict, user: dict = Depends(get_current_us
         status = "new"
     fake_dialog = {"status": status, "contact_name": None}
 
-    result = await pipeline.build_and_generate(bot, fake_dialog, cities, city, history, client_text)
+    # Первый ответ бота в тестовом диалоге — с приветствием из настроек
+    first_reply = True
+    for message in history:
+        if message["role"] == "assistant":
+            first_reply = False
+    result = await pipeline.build_and_generate(bot, fake_dialog, cities, city, history, client_text, first_reply)
 
     # ИИ определил другой город → повтор по базе знаний правильного города (как в WhatsApp)
     detected = pipeline.find_city_by_name(cities, result.get("detected_city") or "")
@@ -158,7 +163,7 @@ async def test_chat(bot_id: str, data: dict, user: dict = Depends(get_current_us
         city = detected
         # Повторный вызов ИИ тоже расходует токены — считаем его в лимите
         is_rate_limited(bot["id"], time.time())
-        result = await pipeline.build_and_generate(bot, fake_dialog, cities, city, history, client_text)
+        result = await pipeline.build_and_generate(bot, fake_dialog, cities, city, history, client_text, first_reply)
 
     return {
         "reply": pipeline.strip_staff_prefix(result.get("reply") or ""),
@@ -169,6 +174,7 @@ async def test_chat(bot_id: str, data: dict, user: dict = Depends(get_current_us
         "need_human": bool(result.get("need_human")),
         "need_human_reason": result.get("need_human_reason") or "",
         "client_name": result.get("client_name") or "",
+        "unknown_question": result.get("unknown_question") or "",
         "ok": bool(result.get("ok", True)),
         "model": bot.get("ai_model") or "",
         "usage": result.get("usage") or {},

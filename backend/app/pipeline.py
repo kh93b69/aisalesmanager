@@ -21,7 +21,7 @@ from app.prompts import build_system_blocks, build_state_note, clean_contact_nam
 from app.ai_engine import generate_reply
 from app.messenger import send_to_client, split_images, was_sent_by_us, IMAGE_TAG_PATTERN
 from app.transcribe import transcribe_audio_url
-from app.notifier import notify_hot_lead, notify_attention, notify_text
+from app.notifier import notify_hot_lead, notify_attention, notify_text, notify_unknown_question
 
 # Сколько последних сообщений отдаём ИИ
 HISTORY_LIMIT = 30
@@ -694,6 +694,10 @@ async def handle_client_message(bot: dict, channel: str, chat_id: str, text: str
         if not saved:
             return
 
+        # Клиент ответил — дожимы начинаются заново (если он снова замолчит)
+        if dialog.get("followup_count"):
+            update_dialog(dialog["id"], {"followup_count": 0})
+
         # 5. ИИ на паузе — сообщение сохранено, сотрудники увидят его в панели
         if dialog.get("ai_disabled"):
             print(f"PIPELINE: ИИ на паузе в диалоге {dialog['id']} — не отвечаем")
@@ -856,15 +860,19 @@ async def handle_delivery_error(bot: dict, external_id: str, error) -> None:
 
 
 async def build_and_generate(bot: dict, dialog: dict, cities: list[dict], city: dict | None,
-                             history: list[dict], query: str) -> dict:
-    """Собирает базу знаний и промпт для города и вызывает ИИ."""
+                             history: list[dict], query: str, is_first_reply: bool = False) -> dict:
+    """
+    Собирает базу знаний и промпт для города и вызывает ИИ.
+    is_first_reply — бот ещё ни разу не отвечал в этом диалоге (тогда ИИ начнёт с приветствия).
+    """
     city_id = city["id"] if city else None
     knowledge = get_knowledge_for_city(bot["id"], city_id, query)
     images = find_bot_images(bot["id"])
     system_blocks = build_system_blocks(bot, cities, city, knowledge, images)
     dialog_for_note = dict(dialog)
     dialog_for_note["city_id"] = city_id
-    state_note = build_state_note(dialog_for_note, city, now_text(), has_cities=bool(cities))
+    state_note = build_state_note(dialog_for_note, city, now_text(), has_cities=bool(cities),
+                                  is_first_reply=is_first_reply)
     city_names = [c.get("name") for c in cities if c.get("name")]
     result = await generate_reply(bot, system_blocks, history, state_note, city_names)
     # Отправляем клиенту только картинки самого бота (ссылку «со стороны» ИИ мог взять из сообщения клиента)
@@ -933,6 +941,7 @@ async def _reply_once(bot_id: str, dialog_id: str, answered_user_id=None):
         return None
     last_user_id = messages[-1].get("id")
     kb_query = build_kb_query(messages)
+    first_reply = is_first_reply(messages)
 
     # 3. Город. Если он ещё неизвестен — определяем по тексту клиента.
     # Если уже известен — по тексту НЕ переключаем (ложные срабатывания: «акта» → Актау),
@@ -948,7 +957,7 @@ async def _reply_once(bot_id: str, dialog_id: str, answered_user_id=None):
             print(f"PIPELINE: город диалога {dialog_id} → {city.get('name')} (по тексту)")
 
     # 4–5. Промпт и ответ ИИ
-    result = await build_and_generate(bot, dialog, cities, city, history, kb_query)
+    result = await build_and_generate(bot, dialog, cities, city, history, kb_query, first_reply)
 
     # 6. ИИ определил другой город → один повтор по базе знаний правильного города
     detected = find_city_by_name(cities, result.get("detected_city") or "")
@@ -956,7 +965,7 @@ async def _reply_once(bot_id: str, dialog_id: str, answered_user_id=None):
         city = detected
         update_dialog(dialog_id, {"city_id": city["id"]})
         print(f"PIPELINE: город диалога {dialog_id} → {city.get('name')} (по ИИ), повторная генерация")
-        result = await build_and_generate(bot, dialog, cities, city, history, kb_query)
+        result = await build_and_generate(bot, dialog, cities, city, history, kb_query, first_reply)
 
     # 7. Сотрудник мог перехватить диалог, пока ИИ думал
     fresh = get_dialog(dialog_id)
@@ -1006,7 +1015,23 @@ async def _reply_once(bot_id: str, dialog_id: str, answered_user_id=None):
                 fields["assigned_user_id"] = member.get("user_id")
                 mark_member_assigned(member["id"])
 
-    # 11–12. Нужен человек (или ИИ упал / ошибка отправки)
+    # 11. Вопрос, на который нет ответа в базе знаний: сохраняем (руководитель ответит в панели,
+    # ответ попадёт в базу знаний) и сразу уведомляем руководителя
+    unknown_question = (result.get("unknown_question") or "").strip()
+    unknown_notified = False
+    if unknown_question:
+        is_new = save_unanswered_question(bot_id, dialog_id, city["id"] if city else None,
+                                          unknown_question, last_user_text(messages))
+        if not attention_reason:
+            attention_reason = f"Бот не знает ответа: {unknown_question}"
+        if is_new:
+            try:
+                await notify_unknown_question(bot, dialog, city, team, unknown_question)
+                unknown_notified = True
+            except Exception as error:
+                print(f"PIPELINE ERROR: notify_unknown_question: {error}")
+
+    # 12. Нужен человек (или ИИ упал / ошибка отправки)
     if not attention_reason and result.get("need_human"):
         attention_reason = result.get("need_human_reason") or "ИИ просит подключить менеджера"
     if not attention_reason and not result.get("ok", True):
@@ -1027,13 +1052,50 @@ async def _reply_once(bot_id: str, dialog_id: str, answered_user_id=None):
             await notify_hot_lead(bot, dialog, city, team, dialog.get("hot_reason") or "")
         except Exception as error:
             print(f"PIPELINE ERROR: notify_hot_lead: {error}")
-    if notify_needed:
+    if notify_needed and not unknown_notified:
         try:
             await notify_attention(bot, dialog, city, team, attention_reason)
         except Exception as error:
             print(f"PIPELINE ERROR: notify_attention: {error}")
 
     return last_user_id
+
+
+def is_first_reply(messages: list[dict]) -> bool:
+    """Бот и сотрудники ещё ни разу не писали в этом диалоге (среди загруженных сообщений)."""
+    for message in messages:
+        if message.get("role") in ("assistant", "manager"):
+            return False
+    return True
+
+
+def save_unanswered_question(bot_id: str, dialog_id: str, city_id: str | None,
+                             question: str, client_message: str) -> bool:
+    """
+    Сохраняет вопрос, на который бот не знал ответа. True — сохранён новый вопрос,
+    False — такой же открытый вопрос в этом диалоге уже есть (или ошибка БД).
+    """
+    try:
+        existing = supabase.table("unanswered_questions") \
+            .select("id, question") \
+            .eq("dialog_id", dialog_id) \
+            .eq("status", "open") \
+            .execute()
+        for row in existing.data or []:
+            if (row.get("question") or "").strip().lower() == question.strip().lower():
+                return False
+        supabase.table("unanswered_questions").insert({
+            "bot_id": bot_id,
+            "dialog_id": dialog_id,
+            "city_id": city_id,
+            "question": question[:500],
+            "client_message": (client_message or "")[:2000],
+        }).execute()
+        print(f"PIPELINE: вопрос без ответа в диалоге {dialog_id}: {question}")
+        return True
+    except Exception as error:
+        print(f"PIPELINE ERROR: не удалось сохранить вопрос без ответа: {error}")
+        return False
 
 
 def find_recent_active_dialogs(since_iso: str) -> list[dict]:

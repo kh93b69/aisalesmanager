@@ -20,6 +20,9 @@ from app.access import require_bot_access, public_bot, check_uuid
 from app import wazzup
 from app import notifier
 from app import pipeline
+from app import followups
+# Метка фрагмента «вопрос клиента — ответ руководителя» (раздел «Без ответа»)
+from app.routes.questions import QA_PREFIX
 
 router = APIRouter()
 
@@ -34,7 +37,15 @@ PROFILE_TEXT_FIELDS = {
     "assistant_name": ("Имя ассистента", 50),
     "business_description": ("Описание компании", 3000),
     "target_action": ("Целевое действие", 500),
+    "greeting_message": ("Приветствие", 1000),
+    "sales_script": ("Скрипт продаж", 20000),
 }
+
+# Ссылки, которые бот отправляет по ситуации
+MAX_LINKS = 30
+MAX_LINK_TITLE = 100
+MAX_LINK_URL = 500
+MAX_LINK_WHEN = 300
 
 # Максимальная длина фрагмента базы знаний для PDF/TXT
 CHUNK_MAX_CHARS = 800
@@ -87,6 +98,58 @@ def normalize_chat_id(value, field_label: str = "Telegram chat_id") -> str | Non
         status_code=400,
         detail=f"{field_label}: укажите число (для групп — с минусом, например -1001234567890) или @username канала",
     )
+
+
+def validate_links(raw_links) -> list[dict]:
+    """Список ссылок бота: [{"title", "url", "when"}]. Пустые строки пропускаем, ошибки — 400."""
+    if raw_links is None:
+        return []
+    if not isinstance(raw_links, list):
+        raise HTTPException(status_code=400, detail="Ссылки — неверный формат")
+    if len(raw_links) > MAX_LINKS:
+        raise HTTPException(status_code=400, detail=f"Ссылок не больше {MAX_LINKS}")
+    links = []
+    for item in raw_links:
+        if not isinstance(item, dict):
+            raise HTTPException(status_code=400, detail="Ссылки — неверный формат")
+        title = item.get("title") if isinstance(item.get("title"), str) else ""
+        url = item.get("url") if isinstance(item.get("url"), str) else ""
+        when = item.get("when") if isinstance(item.get("when"), str) else ""
+        title, url, when = title.strip(), url.strip(), when.strip()
+        if not url and not title:
+            continue
+        if not (url.startswith("https://") or url.startswith("http://")) or " " in url:
+            raise HTTPException(status_code=400, detail=f"Ссылка «{title or url}»: адрес должен начинаться с https://")
+        if len(title) > MAX_LINK_TITLE or len(url) > MAX_LINK_URL or len(when) > MAX_LINK_WHEN:
+            raise HTTPException(status_code=400, detail=f"Ссылка «{title or url}»: слишком длинный текст")
+        links.append({"title": title, "url": url, "when": when})
+    return links
+
+
+def validate_followups(raw_steps) -> list[dict]:
+    """Шаги дожима: [{"hours": 1..168, "text": "..."}], не больше 3. Ошибки — 400."""
+    if raw_steps is None:
+        return []
+    if not isinstance(raw_steps, list):
+        raise HTTPException(status_code=400, detail="Дожимы — неверный формат")
+    if len(raw_steps) > followups.MAX_FOLLOWUP_STEPS:
+        raise HTTPException(status_code=400, detail=f"Дожимов не больше {followups.MAX_FOLLOWUP_STEPS}")
+    steps = []
+    for number, item in enumerate(raw_steps, start=1):
+        if not isinstance(item, dict):
+            raise HTTPException(status_code=400, detail="Дожимы — неверный формат")
+        hours = item.get("hours")
+        if isinstance(hours, str) and hours.strip().isdigit():
+            hours = int(hours.strip())
+        if isinstance(hours, bool) or not isinstance(hours, int) \
+                or hours < followups.MIN_FOLLOWUP_HOURS or hours > followups.MAX_FOLLOWUP_HOURS:
+            raise HTTPException(status_code=400,
+                                detail=f"Дожим №{number}: часы — целое число от {followups.MIN_FOLLOWUP_HOURS} до {followups.MAX_FOLLOWUP_HOURS}")
+        text = item.get("text") if isinstance(item.get("text"), str) else ""
+        if len(text.strip()) > followups.MAX_FOLLOWUP_TEXT:
+            raise HTTPException(status_code=400, detail=f"Дожим №{number}: текст не длиннее {followups.MAX_FOLLOWUP_TEXT} символов")
+        steps.append({"hours": hours, "text": text.strip()})
+    return steps
 
 
 def validate_bot_update(data: dict) -> dict:
@@ -160,6 +223,17 @@ def validate_bot_update(data: dict) -> dict:
         if not isinstance(minutes, int) or minutes < 1 or minutes > 240:
             raise HTTPException(status_code=400, detail="Минуты до напоминания — целое число от 1 до 240")
         clean["invoice_reminder_minutes"] = minutes
+
+    if "links" in data:
+        clean["links"] = validate_links(data["links"])
+
+    if "followups_enabled" in data:
+        if not isinstance(data["followups_enabled"], bool):
+            raise HTTPException(status_code=400, detail="Дожимы: укажите, включены ли они")
+        clean["followups_enabled"] = data["followups_enabled"]
+
+    if "followups" in data:
+        clean["followups"] = validate_followups(data["followups"])
 
     if "assignment_mode" in data:
         if data["assignment_mode"] not in ALLOWED_ASSIGNMENT_MODES:
@@ -408,10 +482,12 @@ def get_text_chunk_ids(bot_id: str, city_id: str | None) -> list[str]:
     ids = []
     start = 0
     while True:
+        # Картинки и ответы руководителя на вопросы клиентов ([ВОПРОС-ОТВЕТ]) при замене файла не трогаем
         query = supabase.table("knowledge_chunks") \
             .select("id") \
             .eq("bot_id", bot_id) \
-            .not_.like("content", IMAGE_PREFIX + "%")
+            .not_.like("content", IMAGE_PREFIX + "%") \
+            .not_.like("content", QA_PREFIX + "%")
         if city_id:
             query = query.eq("city_id", city_id)
         else:
