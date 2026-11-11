@@ -232,7 +232,7 @@ export default function WazzupSection({ bot, onBotUpdated }: Props) {
                 type="password"
                 value={apiKey}
                 onChange={(e) => setApiKey(e.target.value)}
-                placeholder="Вставьте ключ из Wazzup: Настройки → API"
+                placeholder="Ключ из Wazzup: «Интеграция с CRM» → API → «Подключить»"
                 autoComplete="off"
               />
               <button className="btn btn-primary" onClick={checkKey} disabled={busy}>

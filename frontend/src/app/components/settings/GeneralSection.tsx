@@ -1,10 +1,10 @@
 "use client";
 
-// Настройки → Основное: тип бизнеса, анкета компании, модель ИИ, дополнительные инструкции.
+// Настройки → Основное: тип бизнеса, анкета компании, дополнительные инструкции.
 // Из анкеты на бэкенде собирается промпт — владельцу не нужно писать его с нуля.
 
 import { useEffect, useState } from "react";
-import { AI_MODELS, AiModel, apiPut, Bot, BUSINESS_TYPES, BusinessType, errorText } from "../api";
+import { apiPut, Bot, BUSINESS_TYPES, BusinessType, errorText } from "../api";
 
 type Props = {
   bot: Bot;
@@ -19,7 +19,6 @@ export default function GeneralSection({ bot, onBotUpdated }: Props) {
   const [description, setDescription] = useState(bot.business_description || "");
   const [targetAction, setTargetAction] = useState(bot.target_action || "");
   const [prompt, setPrompt] = useState(bot.system_prompt || "");
-  const [model, setModel] = useState<AiModel>(bot.ai_model || "claude-haiku-5-5");
   const [saving, setSaving] = useState(false);
   const [result, setResult] = useState("");
   const [error, setError] = useState("");
@@ -33,7 +32,6 @@ export default function GeneralSection({ bot, onBotUpdated }: Props) {
     setDescription(bot.business_description || "");
     setTargetAction(bot.target_action || "");
     setPrompt(bot.system_prompt || "");
-    setModel(bot.ai_model || "claude-haiku-5-5");
     setResult("");
     setError("");
   }, [bot.id]);
@@ -55,7 +53,8 @@ export default function GeneralSection({ bot, onBotUpdated }: Props) {
         business_description: description,
         target_action: targetAction,
         system_prompt: prompt,
-        ai_model: model,
+        // Пока на всех ботах простая и дешёвая модель (выбор модели скрыт)
+        ai_model: "claude-haiku-5-5",
       });
       onBotUpdated(data.bot);
       setResult("Сохранено. Проверьте бота во вкладке «Тест бота»");
@@ -154,26 +153,6 @@ export default function GeneralSection({ bot, onBotUpdated }: Props) {
         <div className="form-group">
           <label>Имя бота в панели</label>
           <input value={name} maxLength={100} onChange={(e) => setName(e.target.value)} placeholder="Например: Продажи WhatsApp" />
-        </div>
-
-        <div className="form-group">
-          <label>Модель ИИ</label>
-          <div className="choice-grid">
-            {AI_MODELS.map((m) => (
-              <label key={m.value} className={`choice-card ${model === m.value ? "active" : ""}`}>
-                <input
-                  type="radio"
-                  name="ai_model"
-                  checked={model === m.value}
-                  onChange={() => setModel(m.value)}
-                />
-                <div>
-                  <div className="choice-title">{m.title}</div>
-                  <div className="choice-desc">{m.description}</div>
-                </div>
-              </label>
-            ))}
-          </div>
         </div>
 
         <div className="form-group">
