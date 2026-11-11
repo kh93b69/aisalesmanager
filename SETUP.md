@@ -25,6 +25,7 @@
 
 1. Supabase Dashboard → **SQL Editor** → New query.
 2. Вставьте целиком файл `backend/migrations/001_wazzup_cities_statuses.sql` → **Run**.
+   Затем так же `backend/migrations/002_storage_bot_images.sql` (хранилище картинок).
    Миграцию можно запускать повторно — она ничего не ломает и не удаляет.
 3. В админ-панели сервиса (`/admin`) поднимите клиенту лимит диалогов
    (`max_dialogs_per_month`) — минимум **3500** для 1500–3000 заявок. Иначе бот замолчит после 100 диалогов.
