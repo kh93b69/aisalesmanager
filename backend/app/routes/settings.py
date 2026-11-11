@@ -1,41 +1,507 @@
+"""
+API настроек: боты, подключение Wazzup, города, база знаний, картинки,
+команда (менеджеры) и тестовое уведомление в Telegram.
+
+Почти всё здесь — только для владельца бота (owner).
+Проверки доступа — через app.access.
+"""
+
 import io
+import re
 import csv
+import uuid
+import asyncio
 import fitz  # pymupdf — для PDF
 import openpyxl  # для Excel
-from fastapi import APIRouter, UploadFile, File, Depends
+from fastapi import APIRouter, UploadFile, File, Depends, HTTPException
 from app.database import supabase
 from app.auth import get_current_user
-from app.whatsapp import (
-    start_session, stop_session, get_session_status,
-    get_qr_code, setup_webhook as waha_setup_webhook
-)
-from app.config import BACKEND_URL
+from app.access import require_bot_access, public_bot, check_uuid
+from app import wazzup
+from app import notifier
 
 router = APIRouter()
 
+# Допустимые модели ИИ и режимы распределения (как в CHECK-ограничениях миграции)
+ALLOWED_AI_MODELS = ["claude-haiku-5-5", "claude-sonnet-5-5"]
+ALLOWED_ASSIGNMENT_MODES = ["none", "round_robin"]
+ALLOWED_BUSINESS_TYPES = ["general", "clinic"]
 
-def _check_bot_ownership(bot_id: str, user_id: str):
-    """Проверяет что бот принадлежит текущему пользователю."""
-    from fastapi import HTTPException
-    bot = supabase.table("bots").select("id").eq("id", bot_id).eq("user_id", user_id).limit(1).execute()
-    if not bot.data:
-        raise HTTPException(status_code=403, detail="Нет доступа к этому боту")
-    return bot.data[0]
+# Текстовые поля анкеты компании: поле → (название для ошибки, максимальная длина)
+PROFILE_TEXT_FIELDS = {
+    "company_name": ("Название компании", 100),
+    "assistant_name": ("Имя ассистента", 50),
+    "business_description": ("Описание компании", 3000),
+    "target_action": ("Целевое действие", 500),
+}
 
+# Максимальная длина фрагмента базы знаний для PDF/TXT
+CHUNK_MAX_CHARS = 800
+
+# Максимальный размер файла базы знаний (20 МБ) и картинки (10 МБ)
+MAX_UPLOAD_BYTES = 20 * 1024 * 1024
+MAX_IMAGE_BYTES = 10 * 1024 * 1024
+
+# Разрешённые форматы базы знаний
+KNOWLEDGE_EXTENSIONS = [".txt", ".pdf", ".csv", ".xlsx"]
+
+# Разрешённые картинки: расширение → content-type (тип берём по расширению, а не от клиента)
+IMAGE_CONTENT_TYPES = {
+    ".jpg": "image/jpeg",
+    ".jpeg": "image/jpeg",
+    ".png": "image/png",
+    ".webp": "image/webp",
+}
+
+# Сколько строк вставлять/удалять за один запрос к Supabase
+DB_BATCH_SIZE = 100
+
+# Supabase отдаёт максимум 1000 строк за запрос — читаем страницами
+PAGE_SIZE = 1000
+
+# Префикс картинок в knowledge_chunks
+IMAGE_PREFIX = "[IMAGE:"
+
+
+# ============================================================
+# Чистые функции (без БД) — их проверяют тесты
+# ============================================================
+
+def normalize_chat_id(value, field_label: str = "Telegram chat_id") -> str | None:
+    """
+    Приводит Telegram chat_id к строке. Пустое значение → None.
+    Допустимо: число (для групп — с минусом) или @username канала.
+    Иначе — HTTPException 400.
+    """
+    if value is None:
+        return None
+    if isinstance(value, bool):
+        raise HTTPException(status_code=400, detail=f"{field_label}: неверный формат")
+    text = str(value).strip()
+    if not text:
+        return None
+    if re.fullmatch(r"-?\d{1,20}", text) or re.fullmatch(r"@[A-Za-z0-9_]{4,64}", text):
+        return text
+    raise HTTPException(
+        status_code=400,
+        detail=f"{field_label}: укажите число (для групп — с минусом, например -1001234567890) или @username канала",
+    )
+
+
+def validate_bot_update(data: dict) -> dict:
+    """
+    Белый список полей бота, которые может менять владелец.
+    Неизвестные поля молча игнорируются (фронтенд может прислать весь объект бота).
+    Неверные значения — HTTPException 400.
+    """
+    if not isinstance(data, dict):
+        raise HTTPException(status_code=400, detail="Неверный формат данных")
+
+    clean = {}
+
+    if "name" in data:
+        name = data["name"]
+        if not isinstance(name, str) or not name.strip():
+            raise HTTPException(status_code=400, detail="Название бота не может быть пустым")
+        if len(name.strip()) > 100:
+            raise HTTPException(status_code=400, detail="Название бота — не длиннее 100 символов")
+        clean["name"] = name.strip()
+
+    if "system_prompt" in data:
+        prompt = data["system_prompt"]
+        if prompt is None:
+            prompt = ""
+        if not isinstance(prompt, str):
+            raise HTTPException(status_code=400, detail="Инструкция для ИИ должна быть текстом")
+        if len(prompt) > 50000:
+            raise HTTPException(status_code=400, detail="Инструкция для ИИ слишком длинная (максимум 50 000 символов)")
+        clean["system_prompt"] = prompt
+
+    if "ai_model" in data:
+        if data["ai_model"] not in ALLOWED_AI_MODELS:
+            raise HTTPException(status_code=400, detail="Неизвестная модель ИИ")
+        clean["ai_model"] = data["ai_model"]
+
+    if "business_type" in data:
+        if data["business_type"] not in ALLOWED_BUSINESS_TYPES:
+            raise HTTPException(status_code=400, detail="Неизвестный тип бизнеса")
+        clean["business_type"] = data["business_type"]
+
+    # Анкета компании: обычные строки ограниченной длины (None → пустая строка)
+    for field_name in PROFILE_TEXT_FIELDS:
+        if field_name not in data:
+            continue
+        title, max_length = PROFILE_TEXT_FIELDS[field_name]
+        value = data[field_name]
+        if value is None:
+            value = ""
+        if not isinstance(value, str):
+            raise HTTPException(status_code=400, detail=f"{title} — должно быть текстом")
+        value = value.strip()
+        if len(value) > max_length:
+            raise HTTPException(status_code=400, detail=f"{title} — не длиннее {max_length} символов")
+        clean[field_name] = value
+
+    if "telegram_notify_chat_id" in data:
+        clean["telegram_notify_chat_id"] = normalize_chat_id(
+            data["telegram_notify_chat_id"], "Чат уведомлений руководителя"
+        )
+
+    if "invoice_reminder_minutes" in data:
+        minutes = data["invoice_reminder_minutes"]
+        # bool — тоже int в Python, поэтому отсекаем его отдельно
+        if isinstance(minutes, bool):
+            raise HTTPException(status_code=400, detail="Минуты до напоминания — целое число от 1 до 240")
+        if isinstance(minutes, str) and minutes.strip().isdigit():
+            minutes = int(minutes.strip())
+        if isinstance(minutes, float) and minutes.is_integer():
+            minutes = int(minutes)
+        if not isinstance(minutes, int) or minutes < 1 or minutes > 240:
+            raise HTTPException(status_code=400, detail="Минуты до напоминания — целое число от 1 до 240")
+        clean["invoice_reminder_minutes"] = minutes
+
+    if "assignment_mode" in data:
+        if data["assignment_mode"] not in ALLOWED_ASSIGNMENT_MODES:
+            raise HTTPException(status_code=400, detail="Неизвестный режим распределения")
+        clean["assignment_mode"] = data["assignment_mode"]
+
+    # telegram_enabled намеренно НЕ в белом списке: Telegram-канал привязывается
+    # к боту через переменную окружения TELEGRAM_BOT_ID (иначе любой мог бы его перехватить)
+
+    return clean
+
+
+def validate_city_data(data: dict, partial: bool = False) -> dict:
+    """
+    Проверяет поля города. partial=True — для PUT (можно прислать не все поля).
+    Возвращает словарь только с разрешёнными полями. Ошибки — HTTPException 400.
+    """
+    if not isinstance(data, dict):
+        raise HTTPException(status_code=400, detail="Неверный формат данных")
+
+    clean = {}
+
+    if "name" in data or not partial:
+        name = data.get("name")
+        if not isinstance(name, str) or not name.strip():
+            raise HTTPException(status_code=400, detail="Укажите название города")
+        if len(name.strip()) > 100:
+            raise HTTPException(status_code=400, detail="Название города — не длиннее 100 символов")
+        clean["name"] = name.strip()
+
+    if "aliases" in data:
+        aliases = data["aliases"] or ""
+        if not isinstance(aliases, str):
+            raise HTTPException(status_code=400, detail="Варианты написания — текст через запятую")
+        if len(aliases) > 1000:
+            raise HTTPException(status_code=400, detail="Слишком много вариантов написания")
+        clean["aliases"] = aliases.strip()
+
+    if "address" in data:
+        address = data["address"] or ""
+        if not isinstance(address, str):
+            raise HTTPException(status_code=400, detail="Адрес должен быть текстом")
+        if len(address) > 3000:
+            raise HTTPException(status_code=400, detail="Адрес слишком длинный (максимум 3000 символов)")
+        clean["address"] = address.strip()
+
+    if "telegram_chat_id" in data:
+        clean["telegram_chat_id"] = normalize_chat_id(data["telegram_chat_id"], "Telegram chat_id города")
+
+    if "sort_order" in data:
+        sort_order = data["sort_order"]
+        if sort_order is None or sort_order == "":
+            sort_order = 0
+        if isinstance(sort_order, str) and re.fullmatch(r"-?\d+", sort_order.strip()):
+            sort_order = int(sort_order.strip())
+        if isinstance(sort_order, bool) or not isinstance(sort_order, int):
+            raise HTTPException(status_code=400, detail="Порядок сортировки — целое число")
+        clean["sort_order"] = sort_order
+
+    return clean
+
+
+def filter_whatsapp_channels(channels: list) -> list[dict]:
+    """Оставляет только каналы WhatsApp и только нужные фронтенду поля."""
+    result = []
+    for channel in channels or []:
+        if not isinstance(channel, dict):
+            continue
+        if channel.get("transport") != "whatsapp":
+            continue
+        result.append({
+            "channelId": channel.get("channelId"),
+            "transport": channel.get("transport"),
+            "plainId": channel.get("plainId"),
+            "state": channel.get("state"),
+        })
+    return result
+
+
+def find_channel(channels: list, channel_id: str) -> dict | None:
+    """Ищет канал по channelId в списке каналов Wazzup."""
+    for channel in channels or []:
+        if isinstance(channel, dict) and channel.get("channelId") == channel_id:
+            return channel
+    return None
+
+
+def _split_long_piece(piece: str, max_chars: int) -> list[str]:
+    """
+    Делит слишком длинный абзац: сначала по предложениям, затем по словам,
+    и только в крайнем случае (одно «слово» длиннее лимита) — жёстко.
+    """
+    sentences = re.split(r"(?<=[.!?…])\s+", piece)
+    parts = []
+    current = ""
+
+    for sentence in sentences:
+        sentence = sentence.strip()
+        if not sentence:
+            continue
+
+        # Предложение само по себе длиннее лимита — режем по словам
+        if len(sentence) > max_chars:
+            if current:
+                parts.append(current)
+                current = ""
+            for word in sentence.split():
+                # Очень длинное «слово» (например, ссылка) — режем жёстко
+                while len(word) > max_chars:
+                    if current:
+                        parts.append(current)
+                        current = ""
+                    parts.append(word[:max_chars])
+                    word = word[max_chars:]
+                if not word:
+                    continue
+                if not current:
+                    current = word
+                elif len(current) + 1 + len(word) <= max_chars:
+                    current = current + " " + word
+                else:
+                    parts.append(current)
+                    current = word
+            continue
+
+        if not current:
+            current = sentence
+        elif len(current) + 1 + len(sentence) <= max_chars:
+            current = current + " " + sentence
+        else:
+            parts.append(current)
+            current = sentence
+
+    if current:
+        parts.append(current)
+    return parts
+
+
+def split_text_into_chunks(text: str, max_chars: int = CHUNK_MAX_CHARS) -> list[str]:
+    """
+    Нарезает текст (PDF/TXT) на фрагменты до max_chars символов.
+    Сначала объединяет целые абзацы, длинные абзацы делит по предложениям,
+    чтобы не рвать слова и смысл.
+    """
+    if not text:
+        return []
+
+    # Абзацы — разделены пустой строкой
+    text = text.replace("\r\n", "\n").replace("\r", "\n")
+    paragraphs = re.split(r"\n\s*\n", text)
+
+    chunks = []
+    current = ""
+
+    for paragraph in paragraphs:
+        # Внутри абзаца лишние пробелы и переносы схлопываем
+        paragraph = re.sub(r"[ \t]+", " ", paragraph)
+        paragraph = re.sub(r"\s*\n\s*", "\n", paragraph).strip()
+        if not paragraph:
+            continue
+
+        if len(paragraph) > max_chars:
+            if current:
+                chunks.append(current)
+                current = ""
+            # Переносы строк внутри длинного абзаца считаем пробелами
+            chunks.extend(_split_long_piece(paragraph.replace("\n", " "), max_chars))
+            continue
+
+        if not current:
+            current = paragraph
+        elif len(current) + 2 + len(paragraph) <= max_chars:
+            current = current + "\n\n" + paragraph
+        else:
+            chunks.append(current)
+            current = paragraph
+
+    if current:
+        chunks.append(current)
+    return chunks
+
+
+def parse_city_id_param(city_id) -> str | None:
+    """Пустой city_id (или "null", "general") означает общую базу знаний."""
+    if city_id is None:
+        return None
+    text = str(city_id).strip()
+    if text == "" or text.lower() in ("null", "none", "general"):
+        return None
+    return check_uuid(text, "город (city_id)")
+
+
+def parse_image_content(content: str) -> dict:
+    """Разбирает строку "[IMAGE:url] filename" в {"url", "name"}."""
+    url = content.split("]")[0].replace(IMAGE_PREFIX, "")
+    name = content.split("] ", 1)[1] if "] " in content else "image"
+    return {"url": url, "name": name}
+
+
+def file_extension(filename: str) -> str:
+    """Расширение файла в нижнем регистре с точкой: "Прайс.PDF" → ".pdf"."""
+    name = (filename or "").lower()
+    if "." not in name:
+        return ""
+    return "." + name.rsplit(".", 1)[1]
+
+
+def safe_storage_name(filename: str) -> str:
+    """Имя файла для Supabase Storage: только латиница, цифры, точка, дефис, подчёркивание."""
+    name = re.sub(r"[^A-Za-z0-9._-]", "_", filename or "image.jpg")
+    name = name.strip("._") or "image.jpg"
+    return name[-100:]
+
+
+# ============================================================
+# Вспомогательные функции с БД
+# ============================================================
+
+def get_city_of_bot(city_id: str, bot_id: str) -> dict:
+    """Загружает город и проверяет, что он принадлежит боту. Иначе 404."""
+    try:
+        result = supabase.table("cities").select("*").eq("id", city_id).limit(1).execute()
+    except Exception:
+        raise HTTPException(status_code=404, detail="Город не найден")
+    if not result.data or str(result.data[0].get("bot_id")) != str(bot_id):
+        raise HTTPException(status_code=404, detail="Город не найден")
+    return result.data[0]
+
+
+def count_text_chunks(bot_id: str, city_id: str | None) -> int:
+    """Считает текстовые фрагменты базы знаний (без картинок) для города или общей части."""
+    query = supabase.table("knowledge_chunks") \
+        .select("id", count="exact", head=True) \
+        .eq("bot_id", bot_id) \
+        .not_.like("content", IMAGE_PREFIX + "%")
+    if city_id:
+        query = query.eq("city_id", city_id)
+    else:
+        query = query.is_("city_id", "null")
+    result = query.execute()
+    return result.count or 0
+
+
+def get_text_chunk_ids(bot_id: str, city_id: str | None) -> list[str]:
+    """Все id текстовых фрагментов города (или общих) — постранично."""
+    ids = []
+    start = 0
+    while True:
+        query = supabase.table("knowledge_chunks") \
+            .select("id") \
+            .eq("bot_id", bot_id) \
+            .not_.like("content", IMAGE_PREFIX + "%")
+        if city_id:
+            query = query.eq("city_id", city_id)
+        else:
+            query = query.is_("city_id", "null")
+        result = query.order("id").range(start, start + PAGE_SIZE - 1).execute()
+        rows = result.data or []
+        for row in rows:
+            ids.append(row["id"])
+        if len(rows) < PAGE_SIZE:
+            break
+        start += PAGE_SIZE
+    return ids
+
+
+def load_bot(bot_id: str) -> dict:
+    """Перечитывает бота из БД (полная строка, с секретами — только для сервера)."""
+    result = supabase.table("bots").select("*").eq("id", bot_id).limit(1).execute()
+    if not result.data:
+        raise HTTPException(status_code=404, detail="Бот не найден")
+    return result.data[0]
+
+
+def update_bot_row(bot_id: str, fields: dict) -> dict:
+    """Обновляет поля бота и возвращает обновлённую строку."""
+    result = supabase.table("bots").update(fields).eq("id", bot_id).execute()
+    if not result.data:
+        raise HTTPException(status_code=404, detail="Бот не найден")
+    return result.data[0]
+
+
+def get_team_member(member_id: str) -> dict:
+    """Загружает запись команды. Нет — 404."""
+    try:
+        result = supabase.table("team_members").select("*").eq("id", member_id).limit(1).execute()
+    except Exception:
+        raise HTTPException(status_code=404, detail="Сотрудник не найден")
+    if not result.data:
+        raise HTTPException(status_code=404, detail="Сотрудник не найден")
+    return result.data[0]
+
+
+def check_member_city(city_id, bot_id: str) -> str | None:
+    """city_id сотрудника: пусто = все города; иначе город должен быть у этого бота."""
+    city_id = parse_city_id_param(city_id)
+    if city_id:
+        get_city_of_bot(city_id, bot_id)
+    return city_id
+
+
+# ============================================================
+# Боты
+# ============================================================
 
 @router.get("/api/bots")
 def get_bots(user: dict = Depends(get_current_user)):
-    """Получает список ботов текущего пользователя."""
-    result = supabase.table("bots").select("*").eq("user_id", user["id"]).execute()
-    return {"bots": result.data}
+    """Список ботов: свои (owner) + где я в команде (manager)."""
+    own = supabase.table("bots").select("*").eq("user_id", user["id"]).order("created_at").execute()
+
+    bots = []
+    own_ids = []
+    for bot in own.data or []:
+        own_ids.append(bot["id"])
+        item = public_bot(bot)
+        item["my_role"] = "owner"
+        item["my_city_id"] = None
+        bots.append(item)
+
+    memberships = supabase.table("team_members").select("*").eq("user_id", user["id"]).execute()
+    city_by_bot = {}
+    for member in memberships.data or []:
+        if member["bot_id"] not in own_ids:
+            city_by_bot[member["bot_id"]] = member.get("city_id")
+
+    if city_by_bot:
+        team_bots = supabase.table("bots") \
+            .select("*") \
+            .in_("id", list(city_by_bot.keys())) \
+            .order("created_at") \
+            .execute()
+        for bot in team_bots.data or []:
+            item = public_bot(bot)
+            item["my_role"] = "manager"
+            item["my_city_id"] = city_by_bot.get(bot["id"])
+            bots.append(item)
+
+    return {"bots": bots}
 
 
 @router.post("/api/bots")
 def create_bot(data: dict, user: dict = Depends(get_current_user)):
-    """Создаёт нового бота для текущего пользователя."""
-    from fastapi import HTTPException
-
-    # Проверяем лимит ботов по подписке
+    """Создаёт нового бота для текущего пользователя (с учётом лимита подписки)."""
     sub = supabase.table("subscriptions") \
         .select("max_bots, status") \
         .eq("user_id", user["id"]) \
@@ -46,46 +512,252 @@ def create_bot(data: dict, user: dict = Depends(get_current_user)):
     if sub.data:
         if sub.data[0].get("status") != "active":
             raise HTTPException(status_code=403, detail="Подписка неактивна")
-        max_bots = sub.data[0].get("max_bots", 1)
+        max_bots = sub.data[0].get("max_bots") or 1
 
-    current_bots = supabase.table("bots") \
-        .select("id") \
+    current = supabase.table("bots") \
+        .select("id", count="exact", head=True) \
         .eq("user_id", user["id"]) \
         .execute()
+    if (current.count or 0) >= max_bots:
+        raise HTTPException(status_code=403, detail=f"Достигнут лимит ботов ({max_bots}). Обновите подписку.")
 
-    if len(current_bots.data) >= max_bots:
-        raise HTTPException(
-            status_code=403,
-            detail=f"Достигнут лимит ботов ({max_bots}). Обновите подписку."
-        )
+    # Имя и промпт проверяем теми же правилами, что и при редактировании
+    fields = validate_bot_update({
+        "name": data.get("name") or "Новый бот",
+        "system_prompt": data.get("system_prompt") or "",
+    })
 
     result = supabase.table("bots").insert({
-        "name": data.get("name", "Новый бот"),
-        "system_prompt": data.get("system_prompt", ""),
+        "name": fields["name"],
+        "system_prompt": fields["system_prompt"],
         "whatsapp_session": "",
         "user_id": user["id"],
+        "wazzup_webhook_secret": wazzup.generate_webhook_secret(),
     }).execute()
 
-    return {"bot": result.data[0]}
+    bot = public_bot(result.data[0])
+    bot["my_role"] = "owner"
+    bot["my_city_id"] = None
+    return {"bot": bot}
 
 
 @router.put("/api/bots/{bot_id}")
 def update_bot(bot_id: str, data: dict, user: dict = Depends(get_current_user)):
-    """Обновляет настройки бота (промпт, имя и т.д.)."""
-    # Безопасно: не разрешаем менять user_id и id
-    safe_data = {k: v for k, v in data.items() if k not in ("id", "user_id")}
+    """Обновляет настройки бота (только владелец, только разрешённые поля)."""
+    access = require_bot_access(bot_id, user["id"], owner_only=True)
+    fields = validate_bot_update(data)
+    if not fields:
+        return {"bot": public_bot(access["bot"])}
+    bot = update_bot_row(bot_id, fields)
+    return {"bot": public_bot(bot)}
 
-    result = supabase.table("bots") \
-        .update(safe_data) \
-        .eq("id", bot_id) \
-        .eq("user_id", user["id"]) \
+
+# ============================================================
+# Wazzup
+# ============================================================
+
+@router.post("/api/bots/{bot_id}/wazzup/connect")
+async def wazzup_connect(bot_id: str, data: dict, user: dict = Depends(get_current_user)):
+    """
+    Только ПРОВЕРЯЕТ API-ключ Wazzup и возвращает список WhatsApp-каналов.
+    В БД ничего не сохраняем: ключ сохранится вместе с каналом в /wazzup/channel,
+    чтобы проверка нового ключа не ломала рабочее подключение.
+    """
+    require_bot_access(bot_id, user["id"], owner_only=True)
+    api_key = str(data.get("api_key") or "").strip()
+    if not api_key:
+        raise HTTPException(status_code=400, detail="Введите API-ключ Wazzup")
+
+    result = await wazzup.get_channels(api_key)
+    if not result.get("ok"):
+        return {"ok": False, "channels": [], "error": result.get("error") or "Wazzup не принял ключ"}
+
+    channels = filter_whatsapp_channels(result.get("channels"))
+    error = ""
+    if not channels:
+        error = "В аккаунте Wazzup нет WhatsApp-каналов. Добавьте канал в личном кабинете Wazzup."
+    return {"ok": True, "channels": channels, "error": error}
+
+
+@router.post("/api/bots/{bot_id}/wazzup/channel")
+async def wazzup_select_channel(bot_id: str, data: dict, user: dict = Depends(get_current_user)):
+    """
+    Выбирает WhatsApp-канал Wazzup для бота и подключает вебхук.
+    Если в теле есть api_key — используем (и сохраняем) его, иначе — сохранённый ключ.
+    """
+    access = require_bot_access(bot_id, user["id"], owner_only=True)
+    bot = access["bot"]
+    new_api_key = str(data.get("api_key") or "").strip()
+    api_key = new_api_key or bot.get("wazzup_api_key")
+    if not api_key:
+        raise HTTPException(status_code=400, detail="Сначала введите и проверьте API-ключ Wazzup")
+
+    channel_id = str(data.get("channel_id") or "").strip()
+    if not channel_id:
+        raise HTTPException(status_code=400, detail="Выберите канал")
+
+    result = await wazzup.get_channels(api_key)
+    if not result.get("ok"):
+        return {"ok": False, "error": result.get("error") or "Не удалось получить каналы Wazzup", "bot": public_bot(bot)}
+
+    channel = find_channel(filter_whatsapp_channels(result.get("channels")), channel_id)
+    if not channel:
+        return {"ok": False, "error": "Канал не найден в аккаунте Wazzup", "bot": public_bot(bot)}
+
+    secret = bot.get("wazzup_webhook_secret") or wazzup.generate_webhook_secret()
+
+    # Секрет сохраняем ДО подключения вебхука: Wazzup сразу пришлёт тестовый запрос с токеном
+    # Ключ сохраняем только сейчас — вместе с каналом, который в этом аккаунте точно есть
+    bot = update_bot_row(bot_id, {
+        "wazzup_api_key": api_key,
+        "wazzup_channel_id": channel_id,
+        "wazzup_channel_phone": channel.get("plainId"),
+        "wazzup_channel_state": channel.get("state"),
+        "wazzup_webhook_secret": secret,
+    })
+
+    hook = await wazzup.set_webhook(api_key, wazzup.build_webhook_url(bot_id, secret))
+    return {"ok": bool(hook.get("ok")), "error": hook.get("error") or "", "bot": public_bot(bot)}
+
+
+@router.get("/api/bots/{bot_id}/wazzup/status")
+async def wazzup_status(bot_id: str, user: dict = Depends(get_current_user)):
+    """Статус подключения Wazzup: свежее состояние канала и проверка вебхука."""
+    access = require_bot_access(bot_id, user["id"])
+    bot = access["bot"]
+    api_key = bot.get("wazzup_api_key")
+    channel_id = bot.get("wazzup_channel_id")
+
+    status = {
+        "connected": bool(api_key) and bool(channel_id),
+        "channel_id": channel_id,
+        "phone": bot.get("wazzup_channel_phone"),
+        "state": bot.get("wazzup_channel_state"),
+        "webhook_ok": False,
+    }
+    if not api_key or not channel_id:
+        return status
+
+    channels_result = await wazzup.get_channels(api_key)
+    if channels_result.get("ok"):
+        channel = find_channel(channels_result.get("channels"), channel_id)
+        fresh_state = channel.get("state") if channel else "not_found"
+        if fresh_state != bot.get("wazzup_channel_state"):
+            supabase.table("bots").update({"wazzup_channel_state": fresh_state}).eq("id", bot_id).execute()
+        status["state"] = fresh_state
+
+    secret = bot.get("wazzup_webhook_secret")
+    if secret:
+        hook = await wazzup.get_webhook(api_key)
+        if hook.get("ok"):
+            current_url = (hook.get("data") or {}).get("webhooksUri")
+            status["webhook_ok"] = current_url == wazzup.build_webhook_url(bot_id, secret)
+
+    return status
+
+
+@router.post("/api/bots/{bot_id}/wazzup/disconnect")
+def wazzup_disconnect(bot_id: str, user: dict = Depends(get_current_user)):
+    """
+    Отключает Wazzup: забываем ключ и канал.
+    Секрет вебхука меняем — старый адрес вебхука перестанет проходить проверку токена.
+    """
+    require_bot_access(bot_id, user["id"], owner_only=True)
+    bot = update_bot_row(bot_id, {
+        "wazzup_api_key": None,
+        "wazzup_channel_id": None,
+        "wazzup_channel_phone": None,
+        "wazzup_channel_state": None,
+        "wazzup_webhook_secret": wazzup.generate_webhook_secret(),
+    })
+    return {"ok": True, "bot": public_bot(bot)}
+
+
+# ============================================================
+# Города
+# ============================================================
+
+@router.get("/api/bots/{bot_id}/cities")
+def get_cities(bot_id: str, user: dict = Depends(get_current_user)):
+    """Список городов бота + число фрагментов базы знаний в каждом."""
+    require_bot_access(bot_id, user["id"])
+    result = supabase.table("cities") \
+        .select("*") \
+        .eq("bot_id", bot_id) \
+        .order("sort_order") \
+        .order("name") \
         .execute()
 
-    if not result.data:
-        return {"error": "Бот не найден"}
+    cities = []
+    for city in result.data or []:
+        item = dict(city)
+        item["chunks_count"] = count_text_chunks(bot_id, city["id"])
+        cities.append(item)
+    return {"cities": cities}
 
-    return {"bot": result.data[0]}
 
+@router.post("/api/bots/{bot_id}/cities")
+def create_city(bot_id: str, data: dict, user: dict = Depends(get_current_user)):
+    """Добавляет город (только владелец)."""
+    require_bot_access(bot_id, user["id"], owner_only=True)
+    fields = validate_city_data(data, partial=False)
+    fields["bot_id"] = bot_id
+    try:
+        result = supabase.table("cities").insert(fields).execute()
+    except Exception as e:
+        print(f"SETTINGS ERROR: не удалось создать город: {e}")
+        raise HTTPException(status_code=400, detail="Не удалось сохранить город. Возможно, город с таким названием уже есть.")
+    city = dict(result.data[0])
+    city["chunks_count"] = 0
+    return {"city": city}
+
+
+@router.put("/api/cities/{city_id}")
+def update_city(city_id: str, data: dict, user: dict = Depends(get_current_user)):
+    """Редактирует город (только владелец бота)."""
+    try:
+        found = supabase.table("cities").select("*").eq("id", city_id).limit(1).execute()
+    except Exception:
+        raise HTTPException(status_code=404, detail="Город не найден")
+    if not found.data:
+        raise HTTPException(status_code=404, detail="Город не найден")
+    city = found.data[0]
+    require_bot_access(city["bot_id"], user["id"], owner_only=True)
+
+    fields = validate_city_data(data, partial=True)
+    if not fields:
+        return {"city": city}
+    try:
+        result = supabase.table("cities").update(fields).eq("id", city_id).execute()
+    except Exception as e:
+        print(f"SETTINGS ERROR: не удалось обновить город: {e}")
+        raise HTTPException(status_code=400, detail="Не удалось сохранить город. Возможно, город с таким названием уже есть.")
+    return {"city": result.data[0] if result.data else city}
+
+
+@router.delete("/api/cities/{city_id}")
+def delete_city(city_id: str, user: dict = Depends(get_current_user)):
+    """
+    Удаляет город. Фрагменты базы знаний этого города удалятся каскадно (FK).
+    Сотрудники, закреплённые за городом, удаляются из команды — иначе после
+    удаления города они получили бы доступ ко ВСЕМ городам (city_id стал бы NULL).
+    """
+    try:
+        found = supabase.table("cities").select("id, bot_id").eq("id", city_id).limit(1).execute()
+    except Exception:
+        raise HTTPException(status_code=404, detail="Город не найден")
+    if not found.data:
+        raise HTTPException(status_code=404, detail="Город не найден")
+    require_bot_access(found.data[0]["bot_id"], user["id"], owner_only=True)
+
+    removed = supabase.table("team_members").delete().eq("city_id", city_id).execute()
+    supabase.table("cities").delete().eq("id", city_id).execute()
+    return {"status": "deleted", "removed_members": len(removed.data or [])}
+
+
+# ============================================================
+# База знаний
+# ============================================================
 
 def extract_text_from_pdf(content: bytes) -> str:
     """Извлекает текст из PDF файла."""
@@ -100,7 +772,7 @@ def extract_text_from_pdf(content: bytes) -> str:
 def extract_rows_from_xlsx(content: bytes) -> list:
     """
     Извлекает строки из Excel файла.
-    Каждая строка данных возвращается как отдельный элемент с заголовками столбцов.
+    Каждая строка данных — отдельный элемент с заголовками столбцов.
     Формат: "Столбец1: Значение1 | Столбец2: Значение2 | ..."
     """
     wb = openpyxl.load_workbook(io.BytesIO(content), read_only=True)
@@ -124,7 +796,6 @@ def extract_rows_from_xlsx(content: bytes) -> list:
                 first_row = False
                 continue
 
-            # Формируем строку с заголовками: "Название: iPhone | Цена: 100000 | ..."
             parts = []
             for i, cell in enumerate(cells):
                 if cell:
@@ -139,11 +810,8 @@ def extract_rows_from_xlsx(content: bytes) -> list:
 
 
 def extract_rows_from_csv(content: bytes) -> list:
-    """
-    Извлекает строки из CSV файла.
-    Каждая строка данных возвращается с заголовками столбцов.
-    """
-    text = content.decode("utf-8", errors="ignore")
+    """Извлекает строки из CSV файла (каждая строка — с заголовками столбцов)."""
+    text = content.decode("utf-8-sig", errors="ignore")
     reader = csv.reader(io.StringIO(text))
     rows_with_headers = []
     headers = []
@@ -172,166 +840,314 @@ def extract_rows_from_csv(content: bytes) -> list:
     return rows_with_headers
 
 
+def build_chunks_from_file(filename: str, content: bytes) -> list[str]:
+    """
+    Превращает файл в список текстов-фрагментов.
+    Таблицы (XLSX/CSV) — строка = фрагмент. PDF/TXT — по абзацам/предложениям до ~800 символов.
+    """
+    if filename.endswith(".xlsx"):
+        return extract_rows_from_xlsx(content)
+    if filename.endswith(".csv"):
+        return extract_rows_from_csv(content)
+    if filename.endswith(".pdf"):
+        return split_text_into_chunks(extract_text_from_pdf(content))
+    return split_text_into_chunks(content.decode("utf-8-sig", errors="ignore"))
+
+
 @router.post("/api/bots/{bot_id}/knowledge")
-async def upload_knowledge(bot_id: str, file: UploadFile = File(...), user: dict = Depends(get_current_user)):
+async def upload_knowledge(bot_id: str, city_id: str | None = None,
+                           file: UploadFile = File(...), user: dict = Depends(get_current_user)):
     """
-    Загружает файл с базой знаний.
-    Поддерживаемые форматы: TXT, PDF, CSV, XLSX.
-    Разбивает на чанки и сохраняет в таблицу knowledge_chunks.
+    Загружает файл базы знаний (TXT, PDF, CSV, XLSX) для города или общий (city_id пустой).
+    Заменяются ТОЛЬКО фрагменты этого же города (или только общие). Картинки не трогаем.
     """
-    _check_bot_ownership(bot_id, user["id"])
-    content = await file.read()
+    require_bot_access(bot_id, user["id"], owner_only=True)
+    city_id = parse_city_id_param(city_id)
+    if city_id:
+        get_city_of_bot(city_id, bot_id)
+
     filename = file.filename.lower() if file.filename else ""
+    extension = file_extension(filename)
+    if extension not in KNOWLEDGE_EXTENSIONS:
+        raise HTTPException(status_code=400, detail="Поддерживаются TXT, PDF, CSV, XLSX")
 
+    # Размер проверяем до чтения (если клиент его сообщил), и ещё раз после
+    if file.size is not None and file.size > MAX_UPLOAD_BYTES:
+        raise HTTPException(status_code=400, detail="Файл слишком большой (максимум 20 МБ)")
+    content = await file.read()
+    if len(content) > MAX_UPLOAD_BYTES:
+        raise HTTPException(status_code=400, detail="Файл слишком большой (максимум 20 МБ)")
+
+    try:
+        # Разбор PDF/XLSX и нарезка — тяжёлые: выполняем в отдельном потоке,
+        # чтобы не блокировать сервер для других запросов
+        texts = await asyncio.to_thread(build_chunks_from_file, filename, content)
+    except Exception as e:
+        print(f"SETTINGS ERROR: не удалось прочитать файл базы знаний: {e}")
+        raise HTTPException(status_code=400, detail="Не удалось прочитать файл. Проверьте формат (TXT, PDF, CSV, XLSX).")
+
+    # Строки, начинающиеся с "[IMAGE:", приняли бы за картинку — им тут не место
     chunks = []
+    for text in texts:
+        text = text.strip()
+        if text and not text.startswith(IMAGE_PREFIX):
+            chunks.append({"bot_id": bot_id, "city_id": city_id, "content": text})
 
-    # Для таблиц — каждая строка = отдельный чанк с заголовками
-    if filename.endswith(".xlsx") or filename.endswith(".xls"):
-        rows = extract_rows_from_xlsx(content)
-        for row in rows:
-            chunks.append({"bot_id": bot_id, "content": row})
+    if not chunks:
+        raise HTTPException(status_code=400, detail="В файле не найден текст")
 
-    elif filename.endswith(".csv"):
-        rows = extract_rows_from_csv(content)
-        for row in rows:
-            chunks.append({"bot_id": bot_id, "content": row})
+    # Сначала запоминаем старые фрагменты, вставляем новые и только потом удаляем старые —
+    # если вставка упадёт, старая база знаний останется на месте.
+    old_ids = get_text_chunk_ids(bot_id, city_id)
 
-    else:
-        # PDF и TXT — разбиваем текст на чанки по ~500 символов
-        if filename.endswith(".pdf"):
-            text = extract_text_from_pdf(content)
-        else:
-            text = content.decode("utf-8", errors="ignore")
+    for i in range(0, len(chunks), DB_BATCH_SIZE):
+        supabase.table("knowledge_chunks").insert(chunks[i:i + DB_BATCH_SIZE]).execute()
 
-        chunk_size = 500
-        for i in range(0, len(text), chunk_size):
-            chunk = text[i:i + chunk_size].strip()
-            if chunk:
-                chunks.append({"bot_id": bot_id, "content": chunk})
+    for i in range(0, len(old_ids), DB_BATCH_SIZE):
+        supabase.table("knowledge_chunks").delete().in_("id", old_ids[i:i + DB_BATCH_SIZE]).execute()
 
-    if chunks:
-        # Удаляем старые текстовые чанки (НЕ картинки)
-        supabase.table("knowledge_chunks") \
-            .delete() \
-            .eq("bot_id", bot_id) \
-            .not_.like("content", "[IMAGE:%") \
-            .execute()
+    file_format = extension.lstrip(".")
+    return {"chunks_count": len(chunks), "format": file_format, "city_id": city_id}
 
-        # Вставляем новые
-        supabase.table("knowledge_chunks").insert(chunks).execute()
 
-    return {"chunks_count": len(chunks), "format": filename.split(".")[-1] if "." in filename else "txt"}
+@router.get("/api/bots/{bot_id}/knowledge/summary")
+def knowledge_summary(bot_id: str, user: dict = Depends(get_current_user)):
+    """Сколько фрагментов базы знаний в общей части и в каждом городе."""
+    require_bot_access(bot_id, user["id"], owner_only=True)
+    cities = supabase.table("cities").select("id").eq("bot_id", bot_id).execute()
 
+    by_city = {}
+    for city in cities.data or []:
+        by_city[city["id"]] = count_text_chunks(bot_id, city["id"])
+
+    return {"general": count_text_chunks(bot_id, None), "by_city": by_city}
+
+
+# ============================================================
+# Картинки
+# ============================================================
 
 @router.post("/api/bots/{bot_id}/images")
 async def upload_image(bot_id: str, file: UploadFile = File(...), user: dict = Depends(get_current_user)):
     """
-    Загружает картинку в Supabase Storage для бота.
-    Бот сможет отправлять её клиентам.
+    Загружает картинку в Supabase Storage (бакет bot_images).
+    Бот сможет отправлять её клиентам тегом [IMAGE:url].
     """
-    _check_bot_ownership(bot_id, user["id"])
-    content = await file.read()
+    require_bot_access(bot_id, user["id"], owner_only=True)
+
     filename = file.filename or "image.jpg"
+    content_type = IMAGE_CONTENT_TYPES.get(file_extension(filename))
+    if not content_type:
+        raise HTTPException(status_code=400, detail="Поддерживаются картинки JPG, PNG, WEBP")
 
-    # Путь в Supabase Storage: bot_images/{bot_id}/{filename}
-    storage_path = f"{bot_id}/{filename}"
+    if file.size is not None and file.size > MAX_IMAGE_BYTES:
+        raise HTTPException(status_code=400, detail="Картинка слишком большая (максимум 10 МБ)")
+    content = await file.read()
+    if len(content) > MAX_IMAGE_BYTES:
+        raise HTTPException(status_code=400, detail="Картинка слишком большая (максимум 10 МБ)")
 
-    # Загружаем в Supabase Storage (бакет bot_images)
-    supabase.storage.from_("bot_images").upload(storage_path, content)
+    # Уникальный префикс — чтобы файлы с одинаковым именем не конфликтовали
+    storage_path = f"{bot_id}/{uuid.uuid4().hex[:8]}_{safe_storage_name(filename)}"
 
-    # Получаем публичный URL
+    # Тип файла — по расширению (клиент может прислать что угодно)
+    file_options = {"content-type": content_type}
+
+    try:
+        supabase.storage.from_("bot_images").upload(storage_path, content, file_options)
+    except Exception as e:
+        print(f"SETTINGS ERROR: не удалось загрузить картинку: {e}")
+        raise HTTPException(status_code=400, detail="Не удалось загрузить картинку")
+
     public_url = supabase.storage.from_("bot_images").get_public_url(storage_path)
 
-    # Сохраняем URL в таблицу knowledge_chunks с пометкой [IMAGE]
-    supabase.table("knowledge_chunks").insert({
+    # URL храним в knowledge_chunks с пометкой [IMAGE:...] (city_id = NULL)
+    result = supabase.table("knowledge_chunks").insert({
         "bot_id": bot_id,
-        "content": f"[IMAGE:{public_url}] {filename}",
+        "content": f"{IMAGE_PREFIX}{public_url}] {filename}",
     }).execute()
 
-    return {"url": public_url, "filename": filename}
+    image_id = result.data[0]["id"] if result.data else None
+    return {"id": image_id, "url": public_url, "filename": filename}
 
 
 @router.get("/api/bots/{bot_id}/images")
 def get_images(bot_id: str, user: dict = Depends(get_current_user)):
-    """Получает список загруженных картинок бота."""
-    _check_bot_ownership(bot_id, user["id"])
+    """Список загруженных картинок бота."""
+    require_bot_access(bot_id, user["id"], owner_only=True)
     result = supabase.table("knowledge_chunks") \
         .select("id, content") \
         .eq("bot_id", bot_id) \
-        .like("content", "[IMAGE:%") \
+        .like("content", IMAGE_PREFIX + "%") \
         .execute()
 
     images = []
-    for item in result.data:
-        # Парсим URL из формата [IMAGE:url] filename
-        content = item["content"]
-        url = content.split("]")[0].replace("[IMAGE:", "")
-        name = content.split("] ")[-1] if "] " in content else "image"
-        images.append({"id": item["id"], "url": url, "name": name})
-
+    for item in result.data or []:
+        parsed = parse_image_content(item["content"])
+        images.append({"id": item["id"], "url": parsed["url"], "name": parsed["name"]})
     return {"images": images}
 
 
-# --- WhatsApp (WAHA) ---
-
-@router.post("/api/bots/{bot_id}/whatsapp/start")
-async def whatsapp_start(bot_id: str, user: dict = Depends(get_current_user)):
-    """Запускает сессию WhatsApp для бота и настраивает webhook."""
-    # WAHA Core поддерживает только сессию "default"
-    session_name = "default"
-
+@router.delete("/api/images/{chunk_id}")
+def delete_image(chunk_id: str, user: dict = Depends(get_current_user)):
+    """Удаляет картинку бота (запись и, по возможности, файл в Storage)."""
     try:
-        # Запускаем сессию
-        result = await start_session(session_name)
+        found = supabase.table("knowledge_chunks").select("id, bot_id, content").eq("id", chunk_id).limit(1).execute()
+    except Exception:
+        raise HTTPException(status_code=404, detail="Картинка не найдена")
+    if not found.data or not str(found.data[0].get("content", "")).startswith(IMAGE_PREFIX):
+        raise HTTPException(status_code=404, detail="Картинка не найдена")
+    chunk = found.data[0]
+    require_bot_access(chunk["bot_id"], user["id"], owner_only=True)
 
-        # Настраиваем webhook для приёма сообщений
-        webhook_url = f"{BACKEND_URL}/webhook/whatsapp"
-        await waha_setup_webhook(session_name, webhook_url)
+    supabase.table("knowledge_chunks").delete().eq("id", chunk_id).execute()
 
-        # Убираем whatsapp_session у всех других ботов (WAHA Core — одна сессия)
-        supabase.table("bots") \
-            .update({"whatsapp_session": ""}) \
-            .eq("whatsapp_session", session_name) \
-            .execute()
+    # Файл в Storage удаляем «по возможности» — запись уже удалена, это главное
+    url = parse_image_content(chunk["content"])["url"]
+    marker = "/bot_images/"
+    if marker in url:
+        path = url.split(marker, 1)[1].split("?")[0]
+        try:
+            supabase.storage.from_("bot_images").remove([path])
+        except Exception as e:
+            print(f"SETTINGS ERROR: не удалось удалить файл картинки: {e}")
 
-        # Устанавливаем сессию на выбранного бота
-        supabase.table("bots") \
-            .update({"whatsapp_session": session_name}) \
-            .eq("id", bot_id) \
-            .eq("user_id", user["id"]) \
-            .execute()
-
-        return {"status": "started", "session": session_name, "result": result}
-    except Exception as e:
-        return {"status": "error", "error": str(e)}
+    return {"status": "deleted"}
 
 
-@router.post("/api/bots/{bot_id}/whatsapp/stop")
-async def whatsapp_stop(bot_id: str, user: dict = Depends(get_current_user)):
-    """Останавливает сессию WhatsApp для бота."""
-    session_name = "default"
-    result = await stop_session(session_name)
+# ============================================================
+# Команда (менеджеры)
+# ============================================================
 
-    supabase.table("bots") \
-        .update({"whatsapp_session": ""}) \
-        .eq("id", bot_id) \
-        .eq("user_id", user["id"]) \
+@router.get("/api/bots/{bot_id}/team")
+def get_team(bot_id: str, user: dict = Depends(get_current_user)):
+    """Список сотрудников бота с email."""
+    require_bot_access(bot_id, user["id"], owner_only=True)
+    members = supabase.table("team_members").select("*").eq("bot_id", bot_id).order("created_at").execute()
+
+    user_ids = []
+    for member in members.data or []:
+        user_ids.append(member["user_id"])
+
+    emails = {}
+    if user_ids:
+        users = supabase.table("users").select("id, email").in_("id", user_ids).execute()
+        for row in users.data or []:
+            emails[str(row["id"])] = row.get("email")
+
+    result = []
+    for member in members.data or []:
+        result.append({
+            "id": member["id"],
+            "user_id": member["user_id"],
+            "email": emails.get(str(member["user_id"]), ""),
+            "city_id": member.get("city_id"),
+            "telegram_chat_id": member.get("telegram_chat_id"),
+        })
+    return {"members": result}
+
+
+@router.post("/api/bots/{bot_id}/team")
+def add_team_member(bot_id: str, data: dict, user: dict = Depends(get_current_user)):
+    """Добавляет сотрудника по email (он должен быть заранее зарегистрирован)."""
+    access = require_bot_access(bot_id, user["id"], owner_only=True)
+
+    email = str(data.get("email") or "").strip()
+    if not email or "@" not in email:
+        raise HTTPException(status_code=400, detail="Укажите email сотрудника")
+
+    city_id = check_member_city(data.get("city_id"), bot_id)
+    telegram_chat_id = normalize_chat_id(data.get("telegram_chat_id"), "Telegram chat_id сотрудника")
+
+    # ilike без % — сравнение без учёта регистра; затем точная проверка в Python
+    # (символ "_" в ilike означает «любой символ»)
+    found = supabase.table("users").select("id, email").ilike("email", email).limit(10).execute()
+    found_user = None
+    for row in found.data or []:
+        if str(row.get("email") or "").lower() == email.lower():
+            found_user = row
+            break
+    if not found_user:
+        raise HTTPException(status_code=404, detail="Пользователь с таким email не найден — пусть сначала зарегистрируется")
+
+    if str(found_user["id"]) == str(access["bot"].get("user_id")):
+        raise HTTPException(status_code=400, detail="Это владелец бота — у него и так полный доступ")
+
+    existing = supabase.table("team_members") \
+        .select("id") \
+        .eq("bot_id", bot_id) \
+        .eq("user_id", found_user["id"]) \
+        .limit(1) \
         .execute()
+    if existing.data:
+        raise HTTPException(status_code=400, detail="Этот сотрудник уже в команде")
 
-    return {"status": "stopped", "result": result}
+    result = supabase.table("team_members").insert({
+        "bot_id": bot_id,
+        "user_id": found_user["id"],
+        "city_id": city_id,
+        "telegram_chat_id": telegram_chat_id,
+    }).execute()
+    member = result.data[0]
+
+    return {"member": {
+        "id": member["id"],
+        "user_id": member["user_id"],
+        "email": found_user.get("email"),
+        "city_id": member.get("city_id"),
+        "telegram_chat_id": member.get("telegram_chat_id"),
+    }}
 
 
-@router.get("/api/bots/{bot_id}/whatsapp/status")
-async def whatsapp_status(bot_id: str, user: dict = Depends(get_current_user)):
-    """Получает статус подключения WhatsApp."""
-    session_name = "default"
-    status = await get_session_status(session_name)
-    return status
+@router.put("/api/team/{member_id}")
+def update_team_member(member_id: str, data: dict, user: dict = Depends(get_current_user)):
+    """Меняет город и Telegram chat_id сотрудника."""
+    member = get_team_member(member_id)
+    require_bot_access(member["bot_id"], user["id"], owner_only=True)
+
+    fields = {}
+    if "city_id" in data:
+        fields["city_id"] = check_member_city(data.get("city_id"), member["bot_id"])
+    if "telegram_chat_id" in data:
+        fields["telegram_chat_id"] = normalize_chat_id(data.get("telegram_chat_id"), "Telegram chat_id сотрудника")
+
+    if fields:
+        result = supabase.table("team_members").update(fields).eq("id", member_id).execute()
+        if result.data:
+            member = result.data[0]
+
+    return {"member": {
+        "id": member["id"],
+        "user_id": member["user_id"],
+        "city_id": member.get("city_id"),
+        "telegram_chat_id": member.get("telegram_chat_id"),
+    }}
 
 
-@router.get("/api/bots/{bot_id}/whatsapp/qr")
-async def whatsapp_qr(bot_id: str, user: dict = Depends(get_current_user)):
-    """Получает QR-код для подключения WhatsApp."""
-    session_name = "default"
-    qr_data = await get_qr_code(session_name)
-    return qr_data
+@router.delete("/api/team/{member_id}")
+def delete_team_member(member_id: str, user: dict = Depends(get_current_user)):
+    """Удаляет сотрудника из команды бота."""
+    member = get_team_member(member_id)
+    require_bot_access(member["bot_id"], user["id"], owner_only=True)
+    supabase.table("team_members").delete().eq("id", member_id).execute()
+    return {"status": "deleted"}
+
+
+# ============================================================
+# Уведомления
+# ============================================================
+
+@router.post("/api/bots/{bot_id}/test-notification")
+async def test_notification(bot_id: str, data: dict, user: dict = Depends(get_current_user)):
+    """Отправляет тестовое уведомление в Telegram (chat_id из тела или общий чат бота)."""
+    access = require_bot_access(bot_id, user["id"], owner_only=True)
+    chat_id = normalize_chat_id(data.get("chat_id"), "Telegram chat_id")
+    if not chat_id:
+        chat_id = access["bot"].get("telegram_notify_chat_id")
+    if not chat_id:
+        raise HTTPException(status_code=400, detail="Укажите Telegram chat_id для теста")
+
+    ok = await notifier.send_notification(chat_id, "✅ Тестовое уведомление AI Sales Manager")
+    error = ""
+    if not ok:
+        error = "Не удалось отправить. Проверьте chat_id и что бот уведомлений добавлен в чат (и ему написали /start)."
+    return {"ok": bool(ok), "error": error}

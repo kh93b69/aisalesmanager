@@ -1,13 +1,20 @@
 from fastapi import HTTPException, Depends
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
-from supabase import create_client
+from supabase import create_client, ClientOptions
 from app.config import SUPABASE_URL, SUPABASE_ANON_KEY
 
 # Схема авторизации — Bearer token
 security = HTTPBearer()
 
 # Отдельный клиент Supabase с anon_key для проверки токенов
-auth_client = create_client(SUPABASE_URL, SUPABASE_ANON_KEY)
+# ВАЖНО: auto_refresh_token=False и persist_session=False — клиент общий для всех пользователей.
+# Иначе после входа/обновления токена он запоминает сессию последнего пользователя и сам
+# «обновляет» её в фоне, из-за чего у этого пользователя ломается refresh-токен (выкидывает из панели).
+auth_client = create_client(
+    SUPABASE_URL,
+    SUPABASE_ANON_KEY,
+    options=ClientOptions(auto_refresh_token=False, persist_session=False),
+)
 
 
 def get_current_user(credentials: HTTPAuthorizationCredentials = Depends(security)) -> dict:

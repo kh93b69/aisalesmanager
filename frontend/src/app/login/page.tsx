@@ -5,6 +5,16 @@ import { useRouter } from 'next/navigation';
 
 const API_URL = process.env.NEXT_PUBLIC_API_URL || '';
 
+// Куда вернуться после входа (?next=/...). Разрешаем только относительные пути
+// внутри сайта: начинаются с "/", но не с "//" (иначе это ссылка на чужой сайт)
+function getNextPath(): string {
+  const next = new URLSearchParams(window.location.search).get('next');
+  if (next && next.startsWith('/') && !next.startsWith('//') && !next.startsWith('/\\')) {
+    return next;
+  }
+  return '/';
+}
+
 export default function LoginPage() {
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
@@ -36,7 +46,7 @@ export default function LoginPage() {
         localStorage.setItem('access_token', data.access_token);
         if (data.refresh_token) localStorage.setItem('refresh_token', data.refresh_token);
         if (data.user) localStorage.setItem('user', JSON.stringify(data.user));
-        router.push('/');
+        router.push(getNextPath());
       } else {
         setError(data.message || 'Проверьте email для подтверждения');
       }

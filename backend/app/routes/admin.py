@@ -27,12 +27,13 @@ def get_users(admin: dict = Depends(get_current_admin)):
 
         bot_ids = [b["id"] for b in bots.data]
         dialog_count = 0
-        for bot_id in bot_ids:
+        if bot_ids:
+            # count="exact" — считаем на стороне БД (лимит 1000 строк не мешает)
             dialogs = supabase.table("dialogs") \
-                .select("id") \
-                .eq("bot_id", bot_id) \
+                .select("id", count="exact", head=True) \
+                .in_("bot_id", bot_ids) \
                 .execute()
-            dialog_count += len(dialogs.data)
+            dialog_count = dialogs.count or 0
 
         result.append({
             **user,
@@ -98,16 +99,17 @@ def update_role(user_id: str, data: dict, admin: dict = Depends(get_current_admi
 @router.get("/api/admin/stats")
 def get_stats(admin: dict = Depends(get_current_admin)):
     """Общая статистика сервиса."""
-    users = supabase.table("users").select("id").execute()
-    bots = supabase.table("bots").select("id").execute()
-    dialogs = supabase.table("dialogs").select("id").execute()
-    messages = supabase.table("messages").select("id").execute()
+    # count="exact" + head=True — БД возвращает только количество, без строк
+    users = supabase.table("users").select("id", count="exact", head=True).execute()
+    bots = supabase.table("bots").select("id", count="exact", head=True).execute()
+    dialogs = supabase.table("dialogs").select("id", count="exact", head=True).execute()
+    messages = supabase.table("messages").select("id", count="exact", head=True).execute()
 
     return {
-        "users_count": len(users.data),
-        "bots_count": len(bots.data),
-        "dialogs_count": len(dialogs.data),
-        "messages_count": len(messages.data),
+        "users_count": users.count or 0,
+        "bots_count": bots.count or 0,
+        "dialogs_count": dialogs.count or 0,
+        "messages_count": messages.count or 0,
     }
 
 
@@ -124,12 +126,19 @@ def delete_user(user_id: str, admin: dict = Depends(get_current_admin)):
     # Удаляем ботов (и всё связанное)
     bots = supabase.table("bots").select("id").eq("user_id", user_id).execute()
     for bot in bots.data:
-        # Удаляем сообщения и диалоги
-        dialogs = supabase.table("dialogs").select("id").eq("bot_id", bot["id"]).execute()
-        for dialog in dialogs.data:
-            supabase.table("messages").delete().eq("dialog_id", dialog["id"]).execute()
-        supabase.table("dialogs").delete().eq("bot_id", bot["id"]).execute()
+        # Удаляем сообщения и диалоги порциями (Supabase отдаёт максимум 1000 строк за раз)
+        while True:
+            dialogs = supabase.table("dialogs").select("id").eq("bot_id", bot["id"]).limit(100).execute()
+            if not dialogs.data:
+                break
+            dialog_ids = [d["id"] for d in dialogs.data]
+            supabase.table("messages").delete().in_("dialog_id", dialog_ids).execute()
+            supabase.table("dialogs").delete().in_("id", dialog_ids).execute()
         supabase.table("knowledge_chunks").delete().eq("bot_id", bot["id"]).execute()
+        # Города и команда бота удалятся каскадно вместе с ботом (FK ON DELETE CASCADE)
+
+    # Пользователь мог быть сотрудником в чужих ботах — убираем его из команд
+    supabase.table("team_members").delete().eq("user_id", user_id).execute()
 
     supabase.table("bots").delete().eq("user_id", user_id).execute()
     supabase.table("users").delete().eq("id", user_id).execute()

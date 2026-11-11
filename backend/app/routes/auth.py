@@ -94,6 +94,32 @@ def login(data: AuthRequest):
         raise HTTPException(status_code=401, detail="Неверный email или пароль")
 
 
+class RefreshRequest(BaseModel):
+    refresh_token: str
+
+
+@router.post("/api/auth/refresh")
+def refresh(data: RefreshRequest):
+    """
+    Обновляет истёкший access_token по refresh_token (без Authorization).
+    Возвращает новую пару токенов. Ошибка — 401.
+    """
+    if not data.refresh_token.strip():
+        raise HTTPException(status_code=401, detail="Сессия истекла — войдите заново")
+    try:
+        result = auth_client.auth.refresh_session(data.refresh_token.strip())
+    except Exception:
+        raise HTTPException(status_code=401, detail="Сессия истекла — войдите заново")
+
+    if not result or not result.session:
+        raise HTTPException(status_code=401, detail="Сессия истекла — войдите заново")
+
+    return {
+        "access_token": result.session.access_token,
+        "refresh_token": result.session.refresh_token,
+    }
+
+
 @router.get("/api/auth/me")
 def get_me(user: dict = Depends(get_current_user)):
     """Возвращает данные текущего пользователя."""

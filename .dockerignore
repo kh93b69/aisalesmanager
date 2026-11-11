@@ -1,0 +1,12 @@
+# Секреты и локальные файлы не должны попадать в Docker-образ
+.env
+.env.*
+**/.env
+.git
+.claude
+**/__pycache__
+**/*.pyc
+**/node_modules
+frontend/.next
+frontend/out
+backend/tests

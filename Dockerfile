@@ -8,6 +8,9 @@ RUN npm run build
 
 FROM python:3.12-slim
 
+# Логи (print) сразу попадают в Railway, без буферизации
+ENV PYTHONUNBUFFERED=1
+
 WORKDIR /app
 
 # Устанавливаем зависимости бэкенда

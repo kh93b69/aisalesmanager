@@ -2,6 +2,7 @@
 
 import { useEffect, useState } from 'react';
 import { useRouter } from 'next/navigation';
+import { authFetch as baseAuthFetch, refreshTokens, logoutAndRedirect } from '../components/api';
 
 const API_URL = process.env.NEXT_PUBLIC_API_URL || '';
 
@@ -30,16 +31,19 @@ type Stats = {
   messages_count: number;
 };
 
-function authFetch(url: string, options: RequestInit = {}) {
-  const token = localStorage.getItem('access_token');
-  const headers: Record<string, string> = {
-    ...(options.headers as Record<string, string> || {}),
-  };
-  if (token) headers['Authorization'] = `Bearer ${token}`;
-  if (!(options.body instanceof FormData)) {
-    headers['Content-Type'] = headers['Content-Type'] || 'application/json';
+// Запрос с токеном. Если токен истёк (401) — один раз обновляем его и повторяем запрос,
+// чтобы админку не выкидывало на вход каждый час (как в основной панели)
+async function authFetch(url: string, options: RequestInit = {}) {
+  let res = await baseAuthFetch(url, options);
+  if (res.status === 401) {
+    const refreshed = await refreshTokens();
+    if (!refreshed) {
+      logoutAndRedirect(true);
+      return res;
+    }
+    res = await baseAuthFetch(url, options);
   }
-  return fetch(url, { ...options, headers });
+  return res;
 }
 
 export default function AdminPage() {
@@ -49,7 +53,7 @@ export default function AdminPage() {
   const [loading, setLoading] = useState(true);
   const [editingUser, setEditingUser] = useState<string | null>(null);
   const [editSub, setEditSub] = useState<Subscription>({
-    plan: 'free', status: 'active', max_bots: 1, max_dialogs_per_month: 100, expires_at: null
+    plan: 'free', status: 'active', max_bots: 1, max_dialogs_per_month: 500, expires_at: null
   });
 
   useEffect(() => {
@@ -178,7 +182,7 @@ export default function AdminPage() {
                     onClick={() => {
                       setEditingUser(u.id);
                       setEditSub(u.subscription || {
-                        plan: 'free', status: 'active', max_bots: 1, max_dialogs_per_month: 100, expires_at: null
+                        plan: 'free', status: 'active', max_bots: 1, max_dialogs_per_month: 500, expires_at: null
                       });
                     }}
                   >

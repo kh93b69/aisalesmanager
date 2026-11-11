@@ -3,6 +3,9 @@ from app.config import TELEGRAM_BOT_TOKEN
 
 TELEGRAM_API = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}"
 
+# Таймаут запросов к Telegram (секунды)
+TELEGRAM_TIMEOUT = 15
+
 
 async def send_telegram_message(chat_id: int, text: str) -> dict:
     """
@@ -17,7 +20,7 @@ async def send_telegram_message(chat_id: int, text: str) -> dict:
         "text": text,
     }
 
-    async with httpx.AsyncClient() as http_client:
+    async with httpx.AsyncClient(timeout=TELEGRAM_TIMEOUT) as http_client:
         response = await http_client.post(url, json=payload)
         return response.json()
 
@@ -37,7 +40,7 @@ async def send_telegram_photo(chat_id: int, photo_url: str, caption: str = "") -
         "caption": caption,
     }
 
-    async with httpx.AsyncClient() as http_client:
+    async with httpx.AsyncClient(timeout=TELEGRAM_TIMEOUT) as http_client:
         response = await http_client.post(url, json=payload)
         return response.json()
 
@@ -55,6 +58,6 @@ async def set_webhook(webhook_url: str, secret_token: str = "") -> dict:
     if secret_token:
         payload["secret_token"] = secret_token
 
-    async with httpx.AsyncClient() as http_client:
+    async with httpx.AsyncClient(timeout=TELEGRAM_TIMEOUT) as http_client:
         response = await http_client.post(url, json=payload)
         return response.json()
