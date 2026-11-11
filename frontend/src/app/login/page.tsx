@@ -36,7 +36,13 @@ export default function LoginPage() {
         body: JSON.stringify({ email, password }),
       });
 
-      const data = await response.json();
+      // Во время перезапуска сервера ответ может быть не JSON (страница ошибки)
+      let data: { detail?: string; message?: string; access_token?: string; refresh_token?: string; user?: unknown } = {};
+      try {
+        data = await response.json();
+      } catch {
+        throw new Error('Сервер недоступен — попробуйте через минуту');
+      }
 
       if (!response.ok) {
         throw new Error(data.detail || 'Ошибка авторизации');

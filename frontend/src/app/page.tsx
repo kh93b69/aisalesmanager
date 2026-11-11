@@ -97,7 +97,7 @@ export default function Dashboard() {
         if (linkDialogId && !deepLinkHandled.current) {
           deepLinkHandled.current = true;
           try {
-            const res = await apiRequest<{ dialog: Dialog }>(`/api/dialogs/${linkDialogId}/messages`);
+            const res = await apiRequest<{ dialog: Dialog }>(`/api/dialogs/${encodeURIComponent(linkDialogId)}/messages`);
             const botOfDialog = list.find((b) => b.id === res.dialog?.bot_id);
             if (botOfDialog) {
               setSelectedBotId(botOfDialog.id);
@@ -108,6 +108,8 @@ export default function Dashboard() {
           } catch (err) {
             setBotsError(`Не удалось открыть диалог по ссылке: ${errorText(err)}`);
           }
+          // Ссылка не сработала — убираем ?dialog= из адреса, чтобы ошибка не повторялась при обновлении
+          setDialogInUrl(null);
         }
 
         // Иначе — последний выбранный бот или первый в списке
@@ -171,6 +173,8 @@ export default function Dashboard() {
   };
 
   const createBot = async () => {
+    // Повторный Enter, пока бот создаётся, — не создаём второго
+    if (creating) return;
     if (!newBotName.trim()) {
       setCreateError("Введите имя бота");
       return;
@@ -257,7 +261,7 @@ export default function Dashboard() {
             <button className="btn btn-primary" onClick={() => setShowCreateBot(true)}>+ Создать бота</button>
           </div>
         ) : view === "stats" ? (
-          <div className="page-scroll"><StatsView botId={selectedBot.id} /></div>
+          <div className="page-scroll"><StatsView key={selectedBot.id} botId={selectedBot.id} /></div>
         ) : view === "settings" && isOwner ? (
           <div className="page-scroll">
             <SettingsView

@@ -21,7 +21,7 @@ CITIES = [
 ]
 
 
-def make_client(monkeypatch, user_id="owner", answers=None, subscription=None):
+def make_client(monkeypatch, user_id="owner", answers=None, subscription={"status": "active", "max_dialogs_per_month": 500}):
     """
     Клиент API с поддельной БД и поддельным ИИ.
     answers — список ответов ИИ по очереди; calls — города, с которыми вызывали ИИ.
@@ -191,3 +191,11 @@ def test_staff_prefix_stripped(monkeypatch):
     client, _ = make_client(monkeypatch, answers=[answer("[Сотрудник]: Добрый день")])
     data = client.post("/api/bots/bot1/test-chat", json={"messages": [{"role": "user", "content": "Привет"}]}).json()
     assert data["reply"] == "Добрый день"
+
+
+
+def test_chat_requires_subscription(monkeypatch):
+    client, calls = make_client(monkeypatch, answers=[answer()], subscription=None)
+    response = client.post("/api/bots/bot1/test-chat", json={"messages": [{"role": "user", "content": "Привет"}]})
+    assert response.status_code == 403
+    assert calls == []

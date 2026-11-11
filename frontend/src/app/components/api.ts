@@ -199,32 +199,42 @@ export function logoutAndRedirect(keepLocation: boolean = false) {
 
 // Общий промис обновления токена: если несколько запросов одновременно получили 401,
 // токен обновляется один раз, а остальные ждут этот же промис
-let refreshPromise: Promise<boolean> | null = null;
+let refreshPromise: Promise<RefreshResult> | null = null;
 
-// Обновить access_token по refresh_token. Возвращает true, если получилось.
-async function doRefreshTokens(): Promise<boolean> {
+// Результат обновления токена:
+// "ok" — новый токен получен; "expired" — сессия истекла, нужно войти заново;
+// "unavailable" — нет связи / сервер перезапускается (из аккаунта НЕ выкидываем)
+export type RefreshResult = "ok" | "expired" | "unavailable";
+
+// Обновить access_token по refresh_token
+async function doRefreshTokens(): Promise<RefreshResult> {
   const refreshToken = localStorage.getItem("refresh_token");
-  if (!refreshToken) return false;
+  if (!refreshToken) return "expired";
   try {
     const res = await fetch(`${API_URL}/api/auth/refresh`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ refresh_token: refreshToken }),
     });
-    if (!res.ok) return false;
+    if (res.status === 400 || res.status === 401) {
+      // Другая вкладка могла уже обновить токены этим же refresh_token — тогда всё в порядке
+      if (localStorage.getItem("refresh_token") !== refreshToken) return "ok";
+      return "expired";
+    }
+    if (!res.ok) return "unavailable";
     const data = await res.json();
-    if (!data || typeof data.access_token !== "string" || !data.access_token) return false;
+    if (!data || typeof data.access_token !== "string" || !data.access_token) return "unavailable";
     localStorage.setItem("access_token", data.access_token);
     if (typeof data.refresh_token === "string" && data.refresh_token) {
       localStorage.setItem("refresh_token", data.refresh_token);
     }
-    return true;
+    return "ok";
   } catch {
-    return false;
+    return "unavailable";
   }
 }
 
-export function refreshTokens(): Promise<boolean> {
+export function refreshTokens(): Promise<RefreshResult> {
   if (!refreshPromise) {
     refreshPromise = doRefreshTokens().finally(() => {
       refreshPromise = null;
@@ -243,9 +253,12 @@ export async function apiRequest<T>(path: string, options: RequestInit = {}): Pr
     // Токен истёк — пробуем обновить и повторить запрос один раз
     if (res.status === 401) {
       const refreshed = await refreshTokens();
-      if (!refreshed) {
+      if (refreshed === "expired") {
         logoutAndRedirect(true);
         throw new Error("Сессия истекла, войдите заново");
+      }
+      if (refreshed === "unavailable") {
+        throw new Error("Нет связи с сервером. Проверьте интернет.");
       }
       res = await authFetch(`${API_URL}${path}`, options);
     }
@@ -379,6 +392,7 @@ export const WAZZUP_STATES: Record<string, { text: string; cls: string }> = {
   waitForPassword: { text: "Ожидает пароль двухфакторной защиты", cls: "wa-waiting" },
   onModeration: { text: "Канал на модерации", cls: "wa-waiting" },
   rejected: { text: "Канал отклонён Wazzup", cls: "wa-error" },
+  not_found: { text: "Канал не найден в Wazzup — выберите номер заново", cls: "wa-error" },
 };
 
 export function wazzupStateInfo(state: string | null | undefined) {

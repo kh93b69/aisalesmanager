@@ -150,7 +150,7 @@ def test_telegram_channel():
             {}, TG_DIALOG, "Здравствуйте [IMAGE:https://x.com/a.jpg]", from_bot=False))
     finally:
         restore(originals)
-    assert result == {"ok": True, "message_id": "77", "error": ""}
+    assert result == {"ok": True, "message_id": "tg:123456:77", "error": ""}
     assert recorder.calls[0] == ("tg_text", 123456, "Здравствуйте")
     assert recorder.calls[1] == ("tg_photo", 123456, "https://x.com/a.jpg")
 

@@ -570,6 +570,8 @@ def test_client_voice_transcribed(monkeypatch):
 # ---------------- handle_manager_message ----------------
 
 def test_manager_message_pauses_ai(monkeypatch):
+    monkeypatch.setattr(pipeline, "ECHO_CHECK_DELAY_SECONDS", 0)
+    monkeypatch.setattr(pipeline, "get_last_messages", lambda dialog_id: [])
     monkeypatch.setattr(pipeline, "external_id_exists", lambda external_id: False)
     dialog = {"id": "d1", "bot_id": "b1", "ai_disabled": False}
     monkeypatch.setattr(pipeline, "find_dialog", lambda *a: dict(dialog))
@@ -587,6 +589,7 @@ def test_manager_message_pauses_ai(monkeypatch):
 
 
 def test_manager_echo_skipped(monkeypatch):
+    monkeypatch.setattr(pipeline, "ECHO_CHECK_DELAY_SECONDS", 0)
     monkeypatch.setattr(pipeline, "external_id_exists", lambda external_id: False)
     monkeypatch.setattr(pipeline, "find_dialog", lambda *a: {"id": "d1"})
     monkeypatch.setattr(pipeline, "is_bot_echo", lambda dialog_id, content: True)
@@ -656,3 +659,62 @@ def test_strip_staff_prefix():
     assert pipeline.strip_staff_prefix("  [Сотрудник]:[Сотрудник]: Да ") == "Да"
     assert pipeline.strip_staff_prefix("Обычный ответ [Сотрудник]: внутри") == "Обычный ответ [Сотрудник]: внутри"
     assert pipeline.strip_staff_prefix(None) == ""
+
+
+# ---------------- автоответы, эхо API, голосовые, картинки ----------------
+
+def test_is_auto_reply():
+    now = datetime(2026, 11, 12, 10, 0, 30, tzinfo=timezone.utc)
+    fresh_client = [{"role": "user", "created_at": "2026-11-12T10:00:25+00:00"}]
+    old_client = [{"role": "user", "created_at": "2026-11-12T09:58:00+00:00"}]
+    after_bot = [{"role": "assistant", "created_at": "2026-11-12T10:00:29+00:00"}]
+    assert pipeline.is_auto_reply(fresh_client, now) is True
+    assert pipeline.is_auto_reply(old_client, now) is False
+    assert pipeline.is_auto_reply(after_bot, now) is False
+    assert pipeline.is_auto_reply([], now) is False
+
+
+def test_auto_reply_does_not_pause_ai(monkeypatch):
+    monkeypatch.setattr(pipeline, "ECHO_CHECK_DELAY_SECONDS", 0)
+    monkeypatch.setattr(pipeline, "external_id_exists", lambda external_id: False)
+    monkeypatch.setattr(pipeline, "find_dialog", lambda *a: {"id": "d1", "ai_disabled": False})
+    monkeypatch.setattr(pipeline, "is_bot_echo", lambda dialog_id, content: False)
+    just_now = datetime.now(timezone.utc).isoformat()
+    monkeypatch.setattr(pipeline, "get_last_messages", lambda dialog_id: [{"role": "user", "created_at": just_now}])
+    saved, updates = [], []
+    monkeypatch.setattr(pipeline, "save_message", lambda *a, **k: saved.append(a) or {"id": "m"})
+    monkeypatch.setattr(pipeline, "update_dialog", lambda dialog_id, fields: updates.append(fields))
+    asyncio.run(pipeline.handle_manager_message({"id": "b1"}, "whatsapp", "7701", "Здравствуйте! Мы скоро ответим"))
+    assert saved == [] and updates == []
+
+
+def test_echo_of_our_api_message_skipped(monkeypatch):
+    from app import messenger
+    messenger.remember_sent_id("wz-our-1")
+    saved = []
+    monkeypatch.setattr(pipeline, "save_message", lambda *a, **k: saved.append(a))
+    asyncio.run(pipeline.handle_manager_message({"id": "b1"}, "whatsapp", "7701", "[Фото]",
+                                                external_id="wz-our-1", message_type="image"))
+    assert saved == []
+
+
+def test_wait_for_transcriptions(monkeypatch):
+    slept = []
+
+    async def fake_sleep(seconds):
+        slept.append(seconds)
+        pipeline._pending_transcriptions.pop(("b1", "7701"), None)
+
+    monkeypatch.setattr(pipeline.asyncio, "sleep", fake_sleep)
+    pipeline._pending_transcriptions[("b1", "7701")] = 1
+    asyncio.run(pipeline.wait_for_transcriptions("b1", "7701"))
+    assert slept == [1]
+    assert ("b1", "7701") not in pipeline._pending_transcriptions
+
+
+def test_keep_known_images():
+    allowed = ["https://x.supabase.co/storage/v1/object/public/bot_images/b1/sofa.jpg"]
+    reply = (f"Вот диван [IMAGE:{allowed[0]}] и ещё [IMAGE:https://evil.example/track.png]")
+    result = pipeline.keep_known_images(reply, allowed)
+    assert allowed[0] in result
+    assert "evil.example" not in result

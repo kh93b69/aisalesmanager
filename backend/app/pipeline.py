@@ -9,6 +9,7 @@
 Важно: замки (asyncio.Lock) хранятся в памяти процесса — рассчитано на ОДИН инстанс сервера.
 """
 import asyncio
+import re
 from datetime import datetime, timezone, timedelta
 from zoneinfo import ZoneInfo
 
@@ -16,9 +17,9 @@ from app.database import supabase
 from app.config import REPLY_DEBOUNCE_SECONDS, TIMEZONE
 from app.cities import get_bot_cities, detect_city
 from app.rag import get_knowledge_for_city
-from app.prompts import build_system_blocks, build_state_note
+from app.prompts import build_system_blocks, build_state_note, clean_contact_name
 from app.ai_engine import generate_reply
-from app.messenger import send_to_client, split_images
+from app.messenger import send_to_client, split_images, was_sent_by_us, IMAGE_TAG_PATTERN
 from app.transcribe import transcribe_audio_url
 from app.notifier import notify_hot_lead, notify_attention, notify_text
 
@@ -44,6 +45,18 @@ RECOVERY_WINDOW_MINUTES = 30
 
 # Словарь замков: dialog_id → asyncio.Lock (чтобы не отвечать в один диалог дважды одновременно)
 _dialog_locks = {}
+
+# Сколько голосовых сейчас расшифровывается в каждом чате: (bot_id, chat_id) → количество.
+# Текстовые сообщения, пришедшие следом, ждут расшифровку — иначе бот ответит без учёта голосового.
+_pending_transcriptions = {}
+# Сколько максимум ждать расшифровку голосового, секунд
+MAX_TRANSCRIPTION_WAIT_SECONDS = 100
+
+# Эхо исходящего, пришедшее так скоро после сообщения клиента, — это автоответ
+# (приветствие WhatsApp Business, «сообщение об отсутствии»), а не живой сотрудник
+AUTO_REPLY_WINDOW_SECONDS = 15
+# Пауза перед проверкой эха: ответ бота успевает сохраниться в БД
+ECHO_CHECK_DELAY_SECONDS = 3
 
 # Когда владельцу бота последний раз писали про исчерпанный лимит: bot_id → "ГГГГ-ММ-ДД" (UTC)
 _limit_notified = {}
@@ -645,11 +658,19 @@ async def handle_client_message(bot: dict, channel: str, chat_id: str, text: str
         if message_type == "audio":
             transcript = ""
             if media_url:
+                pending_key = (bot.get("id"), chat_id)
+                _pending_transcriptions[pending_key] = _pending_transcriptions.get(pending_key, 0) + 1
                 try:
                     transcript = await transcribe_audio_url(media_url)
                 except Exception as error:
                     print(f"PIPELINE ERROR: расшифровка голосового: {error}")
                     transcript = ""
+                finally:
+                    left = _pending_transcriptions.get(pending_key, 1) - 1
+                    if left > 0:
+                        _pending_transcriptions[pending_key] = left
+                    else:
+                        _pending_transcriptions.pop(pending_key, None)
         content = describe_message(message_type, text, transcript)
         if not content:
             print("PIPELINE: пустое сообщение клиента — пропускаем")
@@ -664,7 +685,8 @@ async def handle_client_message(bot: dict, channel: str, chat_id: str, text: str
 
         # Имя из профиля WhatsApp — только если имени ещё нет (имя, названное в диалоге, важнее)
         if contact_name and contact_name != chat_id and not dialog.get("contact_name"):
-            update_dialog(dialog["id"], {"contact_name": contact_name})
+            # Имя профиля задаёт сам клиент — ограничиваем длину
+            update_dialog(dialog["id"], {"contact_name": contact_name.strip()[:100]})
 
         # 3. Сохраняем сообщение (None — дубль)
         saved = save_message(dialog["id"], "user", content, message_type=message_type,
@@ -679,6 +701,8 @@ async def handle_client_message(bot: dict, channel: str, chat_id: str, text: str
 
         # 6. Debounce: ждём, вдруг клиент допишет ещё
         await asyncio.sleep(REPLY_DEBOUNCE_SECONDS)
+        # Клиент прислал голосовое и сразу текст — ждём расшифровку, чтобы ответить на всё вместе
+        await wait_for_transcriptions(bot.get("id"), chat_id)
         messages = get_last_messages(dialog["id"])
         if has_user_after(messages, saved.get("id")):
             # Клиент дописал — ответит задача более нового сообщения
@@ -692,23 +716,58 @@ async def handle_client_message(bot: dict, channel: str, chat_id: str, text: str
         print(f"PIPELINE ERROR: handle_client_message: {error}\n{traceback.format_exc()}")
 
 
+async def wait_for_transcriptions(bot_id: str, chat_id: str) -> None:
+    """Ждёт, пока в этом чате расшифруются голосовые (не дольше MAX_TRANSCRIPTION_WAIT_SECONDS)."""
+    waited = 0
+    while _pending_transcriptions.get((bot_id, chat_id)) and waited < MAX_TRANSCRIPTION_WAIT_SECONDS:
+        await asyncio.sleep(1)
+        waited += 1
+
+
+def is_auto_reply(messages: list[dict], now: datetime | None = None) -> bool:
+    """
+    Похоже ли исходящее сообщение на автоответ: последнее сообщение в диалоге — от клиента
+    и пришло меньше AUTO_REPLY_WINDOW_SECONDS секунд назад. Живой сотрудник так быстро не отвечает,
+    а приветствие WhatsApp Business / Wazzup уходит сразу.
+    """
+    if not messages or messages[-1].get("role") != "user":
+        return False
+    if now is None:
+        now = datetime.now(timezone.utc)
+    try:
+        client_time = parse_time(messages[-1].get("created_at"))
+    except (ValueError, TypeError):
+        return False
+    return (now - client_time).total_seconds() < AUTO_REPLY_WINDOW_SECONDS
+
+
 async def handle_manager_message(bot: dict, channel: str, chat_id: str, text: str,
                                  external_id: str | None = None, author_name: str | None = None,
                                  message_type: str = "text", media_url: str | None = None) -> None:
     """Сотрудник написал клиенту сам (с телефона или из Wazzup) → сохранить и поставить ИИ на паузу."""
     try:
-        # 1. Дубль или наше же сообщение
-        if external_id_exists(external_id):
+        # 1. Наше же сообщение (отправлено ботом или из панели через API) — не сотрудник с телефона
+        if was_sent_by_us(external_id):
             return
-
         content = describe_message(message_type, text)
         if not content:
+            return
+
+        # Даём ответу бота сохраниться в БД, затем проверяем дубль и эхо
+        await asyncio.sleep(ECHO_CHECK_DELAY_SECONDS)
+        if was_sent_by_us(external_id) or external_id_exists(external_id):
             return
 
         # 2. Защита от эха: бот только что отправил такой же текст
         existing = find_dialog(bot["id"], channel, chat_id)
         if existing and is_bot_echo(existing["id"], content):
             print(f"PIPELINE: эхо ответа бота в диалоге {existing['id']} — пропускаем")
+            return
+
+        # Автоответ (приветствие WhatsApp Business и т.п.) сразу после сообщения клиента —
+        # не считаем ответом сотрудника, иначе ИИ встанет на паузу и клиент останется без ответа
+        if existing and not existing.get("ai_disabled") and is_auto_reply(get_last_messages(existing["id"])):
+            print(f"PIPELINE: автоответ в диалоге {existing['id']} — ИИ не ставим на паузу, сообщение не сохраняем")
             return
 
         # 3. Диалог и сообщение
@@ -807,7 +866,20 @@ async def build_and_generate(bot: dict, dialog: dict, cities: list[dict], city: 
     dialog_for_note["city_id"] = city_id
     state_note = build_state_note(dialog_for_note, city, now_text(), has_cities=bool(cities))
     city_names = [c.get("name") for c in cities if c.get("name")]
-    return await generate_reply(bot, system_blocks, history, state_note, city_names)
+    result = await generate_reply(bot, system_blocks, history, state_note, city_names)
+    # Отправляем клиенту только картинки самого бота (ссылку «со стороны» ИИ мог взять из сообщения клиента)
+    allowed_urls = [image["url"] for image in images]
+    result["reply"] = keep_known_images(result.get("reply") or "", allowed_urls)
+    return result
+
+
+def keep_known_images(reply: str, allowed_urls: list[str]) -> str:
+    """Убирает из ответа теги [IMAGE:url], если такой картинки нет среди картинок бота."""
+    def replace_tag(match):
+        if match.group(1).strip() in allowed_urls:
+            return match.group(0)
+        return ""
+    return re.sub(IMAGE_TAG_PATTERN, replace_tag, reply).strip()
 
 
 async def process_dialog_reply(bot_id: str, dialog_id: str) -> None:
@@ -914,7 +986,8 @@ async def _reply_once(bot_id: str, dialog_id: str, answered_user_id=None):
     # 9. Статус и имя клиента (имя из диалога точнее, чем имя профиля WhatsApp)
     if dialog.get("status") == "new":
         fields["status"] = "in_progress"
-    client_name = (result.get("client_name") or "").strip()
+    # Имя, которое ИИ услышал от клиента — только буквы и не длиннее 40 символов
+    client_name = clean_contact_name(result.get("client_name"))
     if client_name and client_name != dialog.get("contact_name"):
         fields["contact_name"] = client_name
 

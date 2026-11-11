@@ -685,6 +685,8 @@ body {
   display: flex;
   flex-direction: column;
   height: 100vh;
+  /* На телефоне 100vh больше видимой области — поле ввода уходило под панель браузера */
+  height: 100dvh;
   overflow: hidden;
 }
 
@@ -1606,6 +1608,10 @@ code {
 }
 
 .image-tile:hover .image-delete { opacity: 1; }
+/* На телефоне нет наведения мышью — кнопка удаления видна всегда */
+@media (hover: none) {
+  .image-delete { opacity: 1; }
+}
 .image-delete:hover { background: var(--danger); }
 
 .add-member {

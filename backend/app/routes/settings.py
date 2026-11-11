@@ -19,6 +19,7 @@ from app.auth import get_current_user
 from app.access import require_bot_access, public_bot, check_uuid
 from app import wazzup
 from app import notifier
+from app import pipeline
 
 router = APIRouter()
 
@@ -502,17 +503,13 @@ def get_bots(user: dict = Depends(get_current_user)):
 @router.post("/api/bots")
 def create_bot(data: dict, user: dict = Depends(get_current_user)):
     """Создаёт нового бота для текущего пользователя (с учётом лимита подписки)."""
-    sub = supabase.table("subscriptions") \
-        .select("max_bots, status") \
-        .eq("user_id", user["id"]) \
-        .limit(1) \
-        .execute()
-
-    max_bots = 1  # По умолчанию для бесплатного плана
-    if sub.data:
-        if sub.data[0].get("status") != "active":
-            raise HTTPException(status_code=403, detail="Подписка неактивна")
-        max_bots = sub.data[0].get("max_bots") or 1
+    # Та же подписка, что проверяет бот при ответах (самая свежая, с учётом срока)
+    subscription = pipeline.get_owner_subscription(user["id"])
+    max_bots = 1  # Без подписки — один бот
+    if subscription:
+        if pipeline.is_limit_exceeded(subscription, 0):
+            raise HTTPException(status_code=403, detail="Подписка неактивна или истекла")
+        max_bots = subscription.get("max_bots") or 1
 
     current = supabase.table("bots") \
         .select("id", count="exact", head=True) \
@@ -809,10 +806,34 @@ def extract_rows_from_xlsx(content: bytes) -> list:
     return rows_with_headers
 
 
+def decode_text_file(content: bytes) -> str:
+    """
+    Текст файла в строку. Сначала UTF-8; если не получилось — Windows-1251
+    (так сохраняет CSV/TXT Excel и Блокнот на русской Windows).
+    """
+    try:
+        return content.decode("utf-8-sig")
+    except UnicodeDecodeError:
+        return content.decode("cp1251", errors="replace")
+
+
+def detect_csv_delimiter(text: str) -> str:
+    """Разделитель CSV: Excel на русской Windows ставит «;», остальные — «,» (или Tab)."""
+    sample = text[:5000]
+    try:
+        return csv.Sniffer().sniff(sample, delimiters=",;\t").delimiter
+    except csv.Error:
+        # Не удалось определить — берём тот, которого в первой строке больше
+        first_line = sample.split("\n", 1)[0]
+        if first_line.count(";") > first_line.count(","):
+            return ";"
+        return ","
+
+
 def extract_rows_from_csv(content: bytes) -> list:
     """Извлекает строки из CSV файла (каждая строка — с заголовками столбцов)."""
-    text = content.decode("utf-8-sig", errors="ignore")
-    reader = csv.reader(io.StringIO(text))
+    text = decode_text_file(content)
+    reader = csv.reader(io.StringIO(text), delimiter=detect_csv_delimiter(text))
     rows_with_headers = []
     headers = []
     first_row = True
@@ -851,7 +872,7 @@ def build_chunks_from_file(filename: str, content: bytes) -> list[str]:
         return extract_rows_from_csv(content)
     if filename.endswith(".pdf"):
         return split_text_into_chunks(extract_text_from_pdf(content))
-    return split_text_into_chunks(content.decode("utf-8-sig", errors="ignore"))
+    return split_text_into_chunks(decode_text_file(content))
 
 
 @router.post("/api/bots/{bot_id}/knowledge")

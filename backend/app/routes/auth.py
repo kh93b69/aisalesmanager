@@ -1,5 +1,6 @@
 from fastapi import APIRouter, HTTPException, Depends
 from pydantic import BaseModel
+from gotrue.errors import AuthApiError
 from app.auth import auth_client, get_current_user
 from app.database import supabase
 
@@ -22,6 +23,11 @@ def signup(data: AuthRequest):
 
         if not result.user:
             raise HTTPException(status_code=400, detail="Ошибка регистрации")
+
+        # Почта уже зарегистрирована: Supabase не выдаёт ошибку, а возвращает «пустого»
+        # пользователя без identities — такого в users не добавляем
+        if result.user.identities is not None and len(result.user.identities) == 0:
+            raise HTTPException(status_code=400, detail="Этот email уже зарегистрирован — войдите")
 
         # Создаём запись в таблице users
         supabase.table("users").insert({
@@ -108,8 +114,12 @@ def refresh(data: RefreshRequest):
         raise HTTPException(status_code=401, detail="Сессия истекла — войдите заново")
     try:
         result = auth_client.auth.refresh_session(data.refresh_token.strip())
-    except Exception:
+    except AuthApiError:
+        # Supabase ответил: токен недействителен — нужно войти заново
         raise HTTPException(status_code=401, detail="Сессия истекла — войдите заново")
+    except Exception:
+        # Нет связи с Supabase (сбой, перезапуск) — не выкидываем пользователя, просим повторить
+        raise HTTPException(status_code=503, detail="Сервер авторизации временно недоступен — повторите")
 
     if not result or not result.session:
         raise HTTPException(status_code=401, detail="Сессия истекла — войдите заново")

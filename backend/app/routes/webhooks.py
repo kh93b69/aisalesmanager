@@ -8,6 +8,7 @@ import asyncio
 import hmac
 import hashlib
 from fastapi import APIRouter, Request, Depends
+from fastapi.responses import JSONResponse
 from app.database import supabase
 from app.telegram import set_webhook
 from app.auth import get_current_admin
@@ -46,14 +47,26 @@ def start_background(func, *args, **kwargs) -> None:
     _running_tasks.add(task)
     task.add_done_callback(_running_tasks.discard)
 
+class DatabaseUnavailable(Exception):
+    """Supabase не ответил — сообщение нельзя обработать прямо сейчас."""
+
+
 def load_bot(bot_id: str) -> dict | None:
-    """Читает бота из БД (None если нет или ошибка)."""
+    """
+    Читает бота из БД. None — такого бота нет (или неверный id).
+    Если сама БД не ответила — DatabaseUnavailable (тогда отвечаем Wazzup ошибкой, а не «ок»).
+    """
     try:
         result = supabase.table("bots").select("*").eq("id", bot_id).limit(1).execute()
-        if result.data:
-            return result.data[0]
     except Exception as error:
+        text = str(error)
+        # 22P02 — некорректный uuid в адресе: это не сбой БД, просто чужой/битый адрес
+        if "22P02" in text or "invalid input syntax" in text:
+            return None
         print(f"WAZZUP WEBHOOK ERROR: не удалось прочитать бота: {error}")
+        raise DatabaseUnavailable() from error
+    if result.data:
+        return result.data[0]
     return None
 
 
@@ -159,7 +172,12 @@ async def wazzup_webhook(bot_id: str, request: Request):
     """Принимает события Wazzup. Всегда отвечает 200 быстро."""
     try:
         token = request.query_params.get("token", "")
-        bot = load_bot(bot_id)
+        try:
+            # Запрос к БД — в отдельном потоке, чтобы не останавливать остальной сервис
+            bot = await asyncio.to_thread(load_bot, bot_id)
+        except DatabaseUnavailable:
+            # Ошибка 503: сообщение не потеряется «молча» — в логе видно, а Wazzup может повторить доставку
+            return JSONResponse(status_code=503, content={"status": "database_unavailable"})
         if not bot or not is_token_valid(token, bot.get("wazzup_webhook_secret")):
             # 200, чтобы Wazzup не ретраил
             return {"status": "unauthorized"}
@@ -281,6 +299,8 @@ async def telegram_webhook(request: Request):
 @router.post("/api/setup-telegram-webhook")
 async def setup_telegram_webhook(admin: dict = Depends(get_current_admin)):
     """Устанавливает webhook Telegram на текущий сервер с секретным токеном (только админ)."""
+    if not TELEGRAM_BOT_TOKEN:
+        return {"error": "Не задан TELEGRAM_BOT_TOKEN"}
     webhook_url = f"{BACKEND_URL}/webhook/telegram"
     secret_token = hashlib.sha256(TELEGRAM_BOT_TOKEN.encode()).hexdigest()[:32]
     result = await set_webhook(webhook_url, secret_token=secret_token)

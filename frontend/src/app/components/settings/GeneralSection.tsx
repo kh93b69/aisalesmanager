@@ -53,8 +53,6 @@ export default function GeneralSection({ bot, onBotUpdated }: Props) {
         business_description: description,
         target_action: targetAction,
         system_prompt: prompt,
-        // Пока на всех ботах простая и дешёвая модель (выбор модели скрыт)
-        ai_model: "claude-haiku-5-5",
       });
       onBotUpdated(data.bot);
       setResult("Сохранено. Проверьте бота во вкладке «Тест бота»");

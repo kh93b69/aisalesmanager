@@ -5,6 +5,7 @@
 и отправляем картинки отдельными сообщениями после текста.
 """
 import re
+import time
 
 from app import telegram
 from app import wazzup
@@ -14,6 +15,28 @@ IMAGE_TAG_PATTERN = r'\[IMAGE:(https?://[^\]]+)\]'
 
 # Лимит длины одного сообщения в Telegram
 TELEGRAM_MAX_LENGTH = 4096
+
+# id сообщений, которые мы сами отправили через Wazzup API: id → время отправки.
+# Если Wazzup пришлёт их обратно в вебхуке как исходящие (isEcho), это не ответ сотрудника.
+# Хранится в памяти процесса 10 минут (у сервиса 1 реплика).
+_sent_message_ids = {}
+SENT_ID_TTL_SECONDS = 600
+
+
+def remember_sent_id(message_id: str) -> None:
+    """Запоминает id отправленного нами сообщения (и чистит устаревшие)."""
+    if not message_id:
+        return
+    now = time.time()
+    for old_id in list(_sent_message_ids.keys()):
+        if now - _sent_message_ids[old_id] > SENT_ID_TTL_SECONDS:
+            del _sent_message_ids[old_id]
+    _sent_message_ids[message_id] = now
+
+
+def was_sent_by_us(message_id: str | None) -> bool:
+    """True — это сообщение недавно отправили мы сами (бот или сотрудник из панели)."""
+    return bool(message_id) and message_id in _sent_message_ids
 
 
 def split_images(text: str) -> tuple[str, list[str]]:
@@ -64,12 +87,14 @@ async def _send_whatsapp(bot: dict, chat_id: str, clean_text: str, image_urls: l
         result = await wazzup.send_text(api_key, channel_id, chat_id, clean_text)
         if result.get("ok"):
             message_id = result.get("message_id", "")
+            remember_sent_id(message_id)
         else:
             errors.append(f"текст: {result.get('error', '')}")
 
     for url in image_urls:
         result = await wazzup.send_file(api_key, channel_id, chat_id, url)
         if result.get("ok"):
+            remember_sent_id(result.get("message_id", ""))
             if not message_id:
                 message_id = result.get("message_id", "")
         else:
@@ -131,6 +156,9 @@ async def _send_telegram(chat_id: str, clean_text: str, image_urls: list[str]) -
         else:
             errors.append(f"картинка: {_telegram_error(response)}")
 
+    # Номера сообщений Telegram повторяются в разных чатах — добавляем chat_id, как у входящих
+    if message_id:
+        message_id = f"tg:{chat_id}:{message_id}"
     return {"ok": len(errors) == 0, "message_id": message_id, "error": "; ".join(errors)}
 
 

@@ -76,7 +76,13 @@ export default function DialogList({ botId, cities, lockedCityId, selectedId, on
     if (search) params.push(`search=${encodeURIComponent(search)}`);
     const url = `/api/bots/${botId}/dialogs?${params.join("&")}`;
 
-    const load = () => {
+    // Предыдущий запрос ещё идёт — новый не отправляем (иначе запросы копятся на сервере)
+    let inFlight = false;
+    const load = (force: boolean) => {
+      if (inFlight) return;
+      // Вкладка свёрнута — не опрашиваем сервер зря
+      if (!force && document.hidden) return;
+      inFlight = true;
       apiRequest<{ dialogs: Dialog[]; counts?: DialogCounts }>(url)
         .then((data) => {
           if (cancelled) return;
@@ -88,12 +94,13 @@ export default function DialogList({ botId, cities, lockedCityId, selectedId, on
           if (!cancelled) setError(errorText(err));
         })
         .finally(() => {
+          inFlight = false;
           if (!cancelled) setLoading(false);
         });
     };
 
-    load();
-    const interval = setInterval(load, 5000);
+    load(true);
+    const interval = setInterval(() => load(false), 5000);
     return () => {
       cancelled = true;
       clearInterval(interval);

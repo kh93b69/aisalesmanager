@@ -37,8 +37,12 @@ async function authFetch(url: string, options: RequestInit = {}) {
   let res = await baseAuthFetch(url, options);
   if (res.status === 401) {
     const refreshed = await refreshTokens();
-    if (!refreshed) {
+    if (refreshed === "expired") {
       logoutAndRedirect(true);
+      return res;
+    }
+    if (refreshed === "unavailable") {
+      // Нет связи — не выходим из аккаунта, просто вернём ошибку
       return res;
     }
     res = await baseAuthFetch(url, options);
@@ -46,11 +50,22 @@ async function authFetch(url: string, options: RequestInit = {}) {
   return res;
 }
 
+// Срок подписки для таблицы: дата или «бессрочно», истёкшая — с пометкой
+function formatExpires(sub: Subscription): string {
+  if (!sub.expires_at) return 'бессрочно';
+  const date = new Date(sub.expires_at);
+  if (isNaN(date.getTime())) return sub.expires_at;
+  const text = date.toLocaleDateString('ru-RU');
+  return date.getTime() < Date.now() ? `${text} (истекла)` : text;
+}
+
 export default function AdminPage() {
   const router = useRouter();
   const [users, setUsers] = useState<UserWithSub[]>([]);
   const [stats, setStats] = useState<Stats | null>(null);
   const [loading, setLoading] = useState(true);
+  // Текст ошибки последнего действия (загрузка, сохранение, удаление)
+  const [error, setError] = useState('');
   const [editingUser, setEditingUser] = useState<string | null>(null);
   const [editSub, setEditSub] = useState<Subscription>({
     plan: 'free', status: 'active', max_bots: 1, max_dialogs_per_month: 500, expires_at: null
@@ -60,11 +75,14 @@ export default function AdminPage() {
     const token = localStorage.getItem('access_token');
     if (!token) { router.push('/login'); return; }
 
-    const user = localStorage.getItem('user');
-    if (user) {
-      const parsed = JSON.parse(user);
-      if (parsed.role !== 'admin') { router.push('/'); return; }
+    // Роль проверяет сервер (403 → на главную); localStorage может быть испорчен
+    let parsed: { role?: string } | null = null;
+    try {
+      parsed = JSON.parse(localStorage.getItem('user') || 'null');
+    } catch {
+      parsed = null;
     }
+    if (parsed && parsed.role && parsed.role !== 'admin') { router.push('/'); return; }
 
     loadData();
   }, [router]);
@@ -78,38 +96,69 @@ export default function AdminPage() {
       ]);
 
       if (usersRes.status === 403) { router.push('/'); return; }
-
-      const usersData = await usersRes.json();
-      const statsData = await statsRes.json();
-      setUsers(usersData.users || []);
-      setStats(statsData);
-    } catch (err) {
-      console.error('Ошибка загрузки:', err);
+      if (!usersRes.ok || !statsRes.ok) {
+        setError('Не удалось загрузить данные — обновите страницу');
+      } else {
+        const usersData = await usersRes.json();
+        const statsData = await statsRes.json();
+        setUsers(usersData.users || []);
+        setStats(statsData);
+        setError('');
+      }
+    } catch {
+      setError('Нет связи с сервером');
     }
     setLoading(false);
   };
 
+  // Текст ошибки из ответа сервера ({"detail": "..."})
+  const readError = async (res: Response, fallback: string) => {
+    try {
+      const data = await res.json();
+      if (data && typeof data.detail === 'string') return data.detail;
+    } catch {
+      // ответ не JSON
+    }
+    return fallback;
+  };
+
+  // Выполнить действие админки и показать ошибку, если не получилось
+  const runAction = async (url: string, options: RequestInit, fallback: string) => {
+    try {
+      const res = await authFetch(url, options);
+      if (!res.ok) {
+        setError(await readError(res, fallback));
+        return false;
+      }
+      setError('');
+      return true;
+    } catch {
+      setError('Нет связи с сервером');
+      return false;
+    }
+  };
+
   const saveSub = async (userId: string) => {
-    await authFetch(`${API_URL}/api/admin/users/${userId}/subscription`, {
+    const ok = await runAction(`${API_URL}/api/admin/users/${userId}/subscription`, {
       method: 'PUT',
       body: JSON.stringify(editSub),
-    });
-    setEditingUser(null);
+    }, 'Не удалось сохранить подписку');
+    if (ok) setEditingUser(null);
     loadData();
   };
 
   const deleteUser = async (userId: string) => {
     if (!confirm('Удалить пользователя и все его данные?')) return;
-    await authFetch(`${API_URL}/api/admin/users/${userId}`, { method: 'DELETE' });
+    await runAction(`${API_URL}/api/admin/users/${userId}`, { method: 'DELETE' }, 'Не удалось удалить пользователя');
     loadData();
   };
 
   const toggleAdmin = async (userId: string, currentRole: string) => {
     const newRole = currentRole === 'admin' ? 'user' : 'admin';
-    await authFetch(`${API_URL}/api/admin/users/${userId}/role`, {
+    await runAction(`${API_URL}/api/admin/users/${userId}/role`, {
       method: 'PUT',
       body: JSON.stringify({ role: newRole }),
-    });
+    }, 'Не удалось изменить роль');
     loadData();
   };
 
@@ -146,6 +195,8 @@ export default function AdminPage() {
         </div>
       )}
 
+      {error && <div className="alert alert-error" style={{ marginBottom: 16 }}>{error}</div>}
+
       {/* Таблица пользователей */}
       <h2 style={{ marginBottom: 16, fontSize: 18, fontWeight: 600 }}>Пользователи</h2>
       <table className="admin-table">
@@ -158,6 +209,7 @@ export default function AdminPage() {
             <th>Диалоги</th>
             <th>Лимит ботов</th>
             <th>Лимит диалогов</th>
+            <th>Подписка до</th>
             <th>Действия</th>
           </tr>
         </thead>
@@ -170,11 +222,13 @@ export default function AdminPage() {
                   {u.role}
                 </span>
               </td>
-              <td>{u.subscription?.plan || 'free'}</td>
+              <td>{u.subscription ? u.subscription.plan : 'нет подписки'}</td>
               <td>{u.bots_count}</td>
               <td>{u.dialogs_count}</td>
               <td>{u.subscription?.max_bots || 1}</td>
-              <td>{u.subscription?.max_dialogs_per_month || 100}</td>
+              {/* Без подписки бот отвечает в пределах 100 диалогов в месяц, тест бота недоступен */}
+              <td>{u.subscription ? u.subscription.max_dialogs_per_month : 100}</td>
+              <td>{u.subscription ? formatExpires(u.subscription) : '—'}</td>
               <td>
                 <div style={{ display: 'flex', gap: 4 }}>
                   <button
@@ -242,6 +296,20 @@ export default function AdminPage() {
                 value={editSub.max_dialogs_per_month}
                 onChange={(e) => setEditSub({ ...editSub, max_dialogs_per_month: parseInt(e.target.value) || 100 })}
               />
+            </div>
+
+            <div className="form-group">
+              <label>Действует до (пусто — бессрочно)</label>
+              <div style={{ display: 'flex', gap: 8 }}>
+                <input
+                  type="date"
+                  value={editSub.expires_at ? editSub.expires_at.slice(0, 10) : ''}
+                  onChange={(e) => setEditSub({ ...editSub, expires_at: e.target.value || null })}
+                />
+                <button className="btn btn-outline" type="button" onClick={() => setEditSub({ ...editSub, expires_at: null })}>
+                  Бессрочно
+                </button>
+              </div>
             </div>
 
             <div style={{ display: 'flex', gap: 8 }}>

@@ -31,6 +31,7 @@ def make_client(monkeypatch, user_id="owner", email="owner@test.kz", tables=None
     db = FakeDB(tables or sample_tables())
     monkeypatch.setattr(access, "supabase", db)
     monkeypatch.setattr(settings_routes, "supabase", db)
+    monkeypatch.setattr(settings_routes.pipeline, "supabase", db)
     app = FastAPI()
     app.include_router(settings_routes.router)
     app.dependency_overrides[get_current_user] = lambda: {"id": user_id, "email": email}
@@ -461,8 +462,10 @@ def test_auth_refresh(monkeypatch):
 
     class FakeAuth:
         def refresh_session(self, refresh_token):
+            if refresh_token == "network":
+                raise Exception("Connection reset")
             if refresh_token != "good":
-                raise Exception("Invalid Refresh Token")
+                raise auth_routes.AuthApiError("Invalid Refresh Token", 400, None)
             return FakeResponse()
 
     class FakeAuthClient:
@@ -477,3 +480,12 @@ def test_auth_refresh(monkeypatch):
     assert response.json() == {"access_token": "new-access", "refresh_token": "new-refresh"}
     assert client.post("/api/auth/refresh", json={"refresh_token": "bad"}).status_code == 401
     assert client.post("/api/auth/refresh", json={"refresh_token": ""}).status_code == 401
+    # Сбой связи — не 401 (иначе панель выкинет пользователя на страницу входа)
+    assert client.post("/api/auth/refresh", json={"refresh_token": "network"}).status_code == 503
+
+
+def test_csv_cp1251_and_semicolon():
+    from app.routes.settings import extract_rows_from_csv, build_chunks_from_file
+    rows = extract_rows_from_csv("Услуга;Цена\nДиван угловой;120000 тг\n".encode("cp1251"))
+    assert rows == ["Услуга: Диван угловой | Цена: 120000 тг"]
+    assert build_chunks_from_file("a.txt", "Доставка бесплатно".encode("cp1251")) == ["Доставка бесплатно"]

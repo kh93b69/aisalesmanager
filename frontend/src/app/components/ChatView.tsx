@@ -75,6 +75,8 @@ function MessageBubble({ msg }: { msg: Message }) {
   const parsed = msg.role === "assistant" ? splitImages(msg.content || "") : { text: msg.content || "", images: [] as string[] };
   const { text, images } = parsed;
   const type = msg.message_type || "text";
+  // Ссылку на медиа показываем только если она https (ссылку присылает внешний сервис)
+  const mediaUrl = msg.media_url && msg.media_url.startsWith("https://") ? msg.media_url : null;
 
   let author = "Клиент";
   if (msg.role === "assistant") author = "🤖 ИИ-менеджер";
@@ -85,16 +87,16 @@ function MessageBubble({ msg }: { msg: Message }) {
       <div className="message-author">{author}</div>
       <div className="message-bubble">
         {/* Медиа из WhatsApp */}
-        {msg.media_url && type === "audio" && (
-          <a className="media-link" href={msg.media_url} target="_blank" rel="noreferrer">▶ Голосовое сообщение</a>
+        {mediaUrl && type === "audio" && (
+          <a className="media-link" href={mediaUrl} target="_blank" rel="noreferrer">▶ Голосовое сообщение</a>
         )}
-        {msg.media_url && type === "image" && (
-          <a href={msg.media_url} target="_blank" rel="noreferrer">
-            <img className="message-image" src={msg.media_url} alt="Фото" />
+        {mediaUrl && type === "image" && (
+          <a href={mediaUrl} target="_blank" rel="noreferrer">
+            <img className="message-image" src={mediaUrl} alt="Фото" />
           </a>
         )}
-        {msg.media_url && type !== "audio" && type !== "image" && (
-          <a className="media-link" href={msg.media_url} target="_blank" rel="noreferrer">
+        {mediaUrl && type !== "audio" && type !== "image" && (
+          <a className="media-link" href={mediaUrl} target="_blank" rel="noreferrer">
             📎 {type === "video" ? "Видео" : type === "document" ? "Документ" : "Вложение"} — открыть
           </a>
         )}
@@ -145,7 +147,13 @@ export default function ChatView({ dialogId, cities, isOwner, lockedCityId, onCh
   // Загрузка сообщений + опрос каждые 3 секунды
   useEffect(() => {
     let cancelled = false;
-    const load = () => {
+    // Предыдущий запрос ещё идёт — новый не отправляем
+    let inFlight = false;
+    const load = (force: boolean) => {
+      if (inFlight) return;
+      // Вкладка свёрнута — не опрашиваем сервер зря
+      if (!force && document.hidden) return;
+      inFlight = true;
       apiRequest<{ messages: Message[]; dialog: Dialog }>(`/api/dialogs/${dialogId}/messages`)
         .then((data) => {
           if (cancelled) return;
@@ -157,11 +165,12 @@ export default function ChatView({ dialogId, cities, isOwner, lockedCityId, onCh
           if (!cancelled) setLoadError(errorText(err));
         })
         .finally(() => {
+          inFlight = false;
           if (!cancelled) setLoading(false);
         });
     };
-    load();
-    const interval = setInterval(load, 3000);
+    load(true);
+    const interval = setInterval(() => load(false), 3000);
     return () => {
       cancelled = true;
       clearInterval(interval);

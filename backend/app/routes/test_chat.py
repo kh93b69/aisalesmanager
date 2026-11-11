@@ -121,7 +121,11 @@ async def test_chat(bot_id: str, data: dict, user: dict = Depends(get_current_us
     history = validate_test_messages(data.get("messages"))
 
     # Подписка владельца должна быть активной (иначе тест — это бесплатный ИИ)
+    # Подписку выдаёт администратор. Без неё тест недоступен — иначе любой зарегистрировавшийся
+    # получил бы бесплатный ИИ за наш счёт.
     subscription = pipeline.get_owner_subscription(bot.get("user_id"))
+    if not subscription:
+        raise HTTPException(status_code=403, detail="Подписка не оформлена — обратитесь к администратору сервиса")
     if pipeline.is_limit_exceeded(subscription, 0):
         raise HTTPException(status_code=403, detail="Подписка неактивна или истекла — тест бота недоступен")
 
