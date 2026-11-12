@@ -33,6 +33,17 @@ export type Bot = {
   // Дожимы клиентов, которые замолчали
   followups_enabled: boolean;
   followups: FollowupStep[];
+  // График работы: бот пишет клиентам только в это время
+  work_hours_enabled: boolean;
+  work_schedule: WorkDay[];
+  off_hours_message: string;
+  // Оплата: ссылка и реквизиты, которые бот отправляет готовому клиенту
+  payment_enabled: boolean;
+  payment_link: string;
+  payment_details: string;
+  // Сводка дня руководителю в Telegram
+  daily_report_enabled: boolean;
+  daily_report_time: string;
   telegram_notify_chat_id: string | null;
   invoice_reminder_minutes: number;
   assignment_mode: AssignmentMode;
@@ -44,6 +55,23 @@ export type Bot = {
   my_role: "owner" | "manager";
   // Город сотрудника (null — видит все города)
   my_city_id: string | null;
+};
+
+// Один день графика работы (массив из 7 дней, с понедельника)
+export type WorkDay = {
+  enabled: boolean;
+  start: string; // "09:00"
+  end: string; // "21:00"
+};
+
+// Работает ли бот прямо сейчас (ответ /work-status)
+export type WorkStatus = {
+  now: string;
+  timezone: string;
+  utc_offset: string;
+  schedule_enabled: boolean;
+  working: boolean;
+  next_start: string | null;
 };
 
 // Ссылка для бота: название, адрес и когда её отправлять
@@ -163,6 +191,8 @@ export type WazzupChannel = {
   transport: string;
   plainId: string;
   state: string;
+  // Название бота, к которому номер уже подключён (null — свободен)
+  used_by?: string | null;
 };
 
 export type WazzupStatus = {
@@ -401,6 +431,8 @@ export const BUSINESS_TYPES: { value: BusinessType; title: string; description: 
 // Ответ тестового чата (Настройки → Тест бота)
 export type TestChatReply = {
   reply: string;
+  // Бот отправил ссылку на оплату
+  payment_sent?: boolean;
   city_id: string | null;
   city_name: string | null;
   lead_status: "none" | "hot";

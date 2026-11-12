@@ -15,7 +15,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Проект
 
-AI Sales Manager — сервис ИИ-менеджеров продаж в WhatsApp (через Wazzup) для малого и среднего бизнеса. Бот консультирует по базе знаний, ведёт клиента к целевому действию и передаёт «горячих» клиентов сотрудникам (счёт/заказ оформляет человек). Промпт собирается из анкеты компании (тип бизнеса general/clinic, название, описание, целевое действие); для сетей в нескольких городах бот выясняет город и отвечает по базе этого города. В настройках есть «Тест бота» — переписка с ботом без WhatsApp, «Скрипты и дожимы» (приветствие, скрипт продаж, ссылки, напоминания замолчавшим клиентам) и «❓ Без ответа» — вопросы, на которые бот не нашёл ответа в базе знаний (руководитель отвечает → ответ добавляется в базу знаний).
+AI Sales Manager — сервис ИИ-менеджеров продаж в WhatsApp (через Wazzup) для малого и среднего бизнеса. Бот консультирует по базе знаний, ведёт клиента к целевому действию и передаёт «горячих» клиентов сотрудникам (счёт/заказ оформляет человек). Промпт собирается из анкеты компании (тип бизнеса general/clinic, название, описание, целевое действие); для сетей в нескольких городах бот выясняет город и отвечает по базе этого города. В настройках есть «Тест бота» — переписка с ботом без WhatsApp, «Скрипты и дожимы» (приветствие, скрипт продаж, ссылки, напоминания замолчавшим клиентам) «❓ Без ответа» — вопросы, на которые бот не нашёл ответа в базе знаний (руководитель отвечает → ответ добавляется в базу знаний), «🕘 График работы» (бот пишет клиентам строго в рабочие часы, ночные сообщения отвечает утром), «💳 Оплата» (бот сам отправляет ссылку на оплату готовому клиенту) и ежедневная сводка руководителю в Telegram. Несколько номеров одного аккаунта Wazzup — по боту на номер, общий вебхук аккаунта раздаёт сообщения по channelId.
 
 ## Стек
 
@@ -65,8 +65,10 @@ backend/app/
   wazzup.py       — клиент Wazzup API (каналы, вебхук, отправка)
   messenger.py    — отправка клиенту в нужный канал (WhatsApp/Telegram), теги [IMAGE:url]
   notifier.py     — уведомления в Telegram (горячий клиент, напоминания, внимание)
-  scheduler.py    — напоминания о счёте и дожимы (каждые 60 с)
+  scheduler.py    — каждые 60 с: напоминания о счёте, дожимы, ответы после нерабочего времени, сводка дня
   followups.py    — дожимы: напоминания клиентам, которые замолчали после ответа бота
+  work_hours.py   — график работы бота (is_bot_working, смены через полночь, TIMEZONE)
+  daily_report.py — сводка дня в Telegram руководителю
   transcribe.py   — расшифровка голосовых
   telegram.py     — Telegram Bot API (канал для клиентов)
   routes/
@@ -85,11 +87,11 @@ frontend/src/app/
 
 ## Таблицы Supabase
 
-- **bots** — настройки бота: анкета (business_type, company_name, assistant_name, business_description, target_action), скрипты (greeting_message, sales_script, links), дожимы (followups_enabled, followups), system_prompt, ai_model, wazzup_* (ключ и секрет не отдаются на фронт), уведомления
+- **bots** — настройки бота: анкета (business_type, company_name, assistant_name, business_description, target_action), скрипты (greeting_message, sales_script, links), дожимы (followups_enabled, followups), график (work_hours_enabled, work_schedule, off_hours_message), оплата (payment_enabled, payment_link, payment_details), сводка (daily_report_enabled, daily_report_time, daily_report_last_date), system_prompt, ai_model, wazzup_* (ключ и секрет не отдаются на фронт), уведомления
 - **cities** — города/филиалы бота (name, aliases, address, telegram_chat_id)
 - **team_members** — сотрудники бота (user_id, city_id — NULL = все города)
-- **dialogs** — диалоги: city_id, status (new → in_progress → hot → invoice_sent → paid / lost), ai_disabled, needs_attention, hot_at, followup_count…
-- **messages** — сообщения (role: user / assistant / manager, external_id — защита от дублей)
+- **dialogs** — диалоги: city_id, status (new → in_progress → hot → invoice_sent → paid / lost), ai_disabled, needs_attention, hot_at, followup_count, off_hours_since (ждёт рабочего времени)…
+- **messages** — сообщения (role: user / assistant / manager, external_id — защита от дублей; автоответ нерабочего времени — assistant с author_name «Автоответ (нерабочее время)», ИИ его не видит)
 - **knowledge_chunks** — фрагменты базы знаний (city_id NULL = общая; «[IMAGE:…]» — картинки, «[ВОПРОС-ОТВЕТ]» — ответы руководителя, не удаляются при загрузке файла)
 - **unanswered_questions** — вопросы, на которые бот не знал ответа (open / answered / dismissed)
 - **users**, **subscriptions** — аккаунты и лимиты

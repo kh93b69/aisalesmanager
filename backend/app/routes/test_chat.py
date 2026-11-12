@@ -13,6 +13,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from app.auth import get_current_user
 from app.access import require_bot_access, check_uuid
 from app import pipeline
+from app.prompts import build_payment_message
 
 router = APIRouter()
 
@@ -23,7 +24,7 @@ MAX_TEST_MESSAGE_LENGTH = 4000
 MAX_TEST_HISTORY_CHARS = 20000
 
 # Статусы, которые браузер может передать (после «горячего» ответа бот ведёт себя как в WhatsApp)
-ALLOWED_TEST_STATUSES = ["new", "in_progress", "hot"]
+ALLOWED_TEST_STATUSES = ["new", "in_progress", "hot", "invoice_sent"]
 
 # Не больше 60 тестовых ответов в час на одного бота (токены оплачиваем мы)
 MAX_TEST_REPLIES_PER_HOUR = 60
@@ -165,8 +166,18 @@ async def test_chat(bot_id: str, data: dict, user: dict = Depends(get_current_us
         is_rate_limited(bot["id"], time.time())
         result = await pipeline.build_and_generate(bot, fake_dialog, cities, city, history, client_text, first_reply)
 
+    # Клиент готов оплатить → как в WhatsApp, в конец ответа добавляется ссылка на оплату
+    reply = pipeline.strip_staff_prefix(result.get("reply") or "")
+    payment_sent = False
+    if reply and result.get("send_payment"):
+        payment_message = build_payment_message(bot)
+        if payment_message:
+            reply = reply + "\n\n" + payment_message
+            payment_sent = True
+
     return {
-        "reply": pipeline.strip_staff_prefix(result.get("reply") or ""),
+        "reply": reply,
+        "payment_sent": payment_sent,
         "city_id": city["id"] if city else None,
         "city_name": city.get("name") if city else None,
         "lead_status": result.get("lead_status") or "none",

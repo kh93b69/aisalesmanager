@@ -14,6 +14,12 @@ export default function NotificationsSection({ bot, onBotUpdated }: Props) {
   const [chatId, setChatId] = useState(bot.telegram_notify_chat_id || "");
   const [minutes, setMinutes] = useState(String(bot.invoice_reminder_minutes || 10));
   const [mode, setMode] = useState<AssignmentMode>(bot.assignment_mode || "none");
+  // Сводка дня (по умолчанию включена, 20:00)
+  const [reportEnabled, setReportEnabled] = useState(bot.daily_report_enabled !== false);
+  const [reportTime, setReportTime] = useState(bot.daily_report_time || "20:00");
+  const [reportSending, setReportSending] = useState(false);
+  const [reportResult, setReportResult] = useState("");
+  const [reportError, setReportError] = useState("");
   const [saving, setSaving] = useState(false);
   const [result, setResult] = useState("");
   const [error, setError] = useState("");
@@ -27,6 +33,10 @@ export default function NotificationsSection({ bot, onBotUpdated }: Props) {
     setChatId(bot.telegram_notify_chat_id || "");
     setMinutes(String(bot.invoice_reminder_minutes || 10));
     setMode(bot.assignment_mode || "none");
+    setReportEnabled(bot.daily_report_enabled !== false);
+    setReportTime(bot.daily_report_time || "20:00");
+    setReportResult("");
+    setReportError("");
     setTestChatId(bot.telegram_notify_chat_id || "");
     setResult("");
     setError("");
@@ -40,6 +50,10 @@ export default function NotificationsSection({ bot, onBotUpdated }: Props) {
       setError("Минуты до напоминания — число от 1 до 240");
       return;
     }
+    if (reportEnabled && !reportTime) {
+      setError("Укажите время сводки, например 20:00");
+      return;
+    }
     setSaving(true);
     setError("");
     setResult("");
@@ -50,11 +64,33 @@ export default function NotificationsSection({ bot, onBotUpdated }: Props) {
         assignment_mode: mode,
       });
       onBotUpdated(data.bot);
+      // Сводку сохраняем отдельно: если в базе ещё нет её колонок (миграция 004),
+      // остальные настройки всё равно сохранятся
+      const report = await apiPut<{ bot: Bot }>(`/api/bots/${bot.id}`, {
+        daily_report_enabled: reportEnabled,
+        daily_report_time: reportTime || "20:00",
+      });
+      onBotUpdated(report.bot);
       setResult("Сохранено");
     } catch (err) {
       setError(errorText(err));
     }
     setSaving(false);
+  };
+
+  // Отправить сводку за сегодня прямо сейчас (проверка)
+  const sendReportNow = async () => {
+    setReportSending(true);
+    setReportResult("");
+    setReportError("");
+    try {
+      const data = await apiPost<{ ok: boolean; error?: string }>(`/api/bots/${bot.id}/daily-report/test`);
+      if (data.ok) setReportResult("Сводка отправлена — проверьте Telegram");
+      else setReportError(data.error || "Не дошло");
+    } catch (err) {
+      setReportError(errorText(err));
+    }
+    setReportSending(false);
   };
 
   const sendTest = async () => {
@@ -105,6 +141,26 @@ export default function NotificationsSection({ bot, onBotUpdated }: Props) {
             <option value="round_robin">По очереди — одному ответственному</option>
           </select>
         </div>
+      </div>
+
+      <div className="form-group">
+        <label>Сводка дня в чат руководителя</label>
+        <label className="checkbox-row">
+          <input type="checkbox" checked={reportEnabled} onChange={(e) => setReportEnabled(e.target.checked)} />
+          Каждый день присылать сводку: новые обращения, горячие, оплаты, кто ждёт ответа, вопросы без ответа
+        </label>
+        {reportEnabled && (
+          <div className="input-row" style={{ alignItems: "center", marginTop: 8 }}>
+            <span>Время отправки:</span>
+            <input type="time" className="input" style={{ width: 130 }} value={reportTime} onChange={(e) => setReportTime(e.target.value)} />
+            <button className="btn btn-sm btn-outline" onClick={sendReportNow} disabled={reportSending}>
+              {reportSending ? "Отправляем…" : "Прислать сводку сейчас"}
+            </button>
+          </div>
+        )}
+        {reportResult && <div className="text-success" style={{ marginTop: 8 }}>✓ {reportResult}</div>}
+        {reportError && <div className="text-danger" style={{ marginTop: 8 }}>{reportError}</div>}
+        <div className="form-hint">Уходит в «Чат руководителя» выше (сначала сохраните его). Время — по Казахстану.</div>
       </div>
 
       <div className="form-actions">

@@ -70,6 +70,28 @@ def load_bot(bot_id: str) -> dict | None:
     return None
 
 
+def load_account_bots(bot: dict) -> list[dict]:
+    """
+    Все боты, подключённые к тому же аккаунту Wazzup (тот же API-ключ), включая сам бот.
+    Вебхук у аккаунта Wazzup один на все номера, поэтому сообщения второго номера приходят
+    на адрес первого бота — раздаём их ботам по номеру (channelId).
+    """
+    api_key = bot.get("wazzup_api_key")
+    if not api_key:
+        return [bot]
+    try:
+        result = supabase.table("bots").select("*").eq("wazzup_api_key", api_key).execute()
+    except Exception as error:
+        print(f"WAZZUP WEBHOOK ERROR: не удалось найти ботов аккаунта: {error}")
+        return [bot]
+    # Бот из адреса — первым; остальные — только того же владельца
+    bots = [bot]
+    for other in result.data or []:
+        if other.get("id") != bot.get("id") and other.get("user_id") == bot.get("user_id"):
+            bots.append(other)
+    return bots
+
+
 def is_token_valid(token: str, secret: str | None) -> bool:
     """Сравнение токена из URL с секретом бота (защита от подбора по времени)."""
     if not token or not secret:
@@ -187,29 +209,48 @@ async def wazzup_webhook(bot_id: str, request: Request):
         except Exception:
             return {"status": "bad_request"}
 
-        for event in parse_wazzup_body(body, bot):
-            kind = event["kind"]
-            if kind == "channel_state":
-                save_channel_state(bot_id, event["state"])
-            elif kind == "status_error":
-                print(f"WAZZUP WEBHOOK: ошибка доставки messageId={event['message_id']} error={event['error']}")
-                start_background(handle_delivery_error, bot, event["message_id"], event["error"])
-            elif kind == "client":
-                start_background(
-                    handle_client_message, bot, "whatsapp", event["chat_id"], event["text"],
-                    message_type=event["message_type"], media_url=event["media_url"],
-                    external_id=event["external_id"], contact_name=event["contact_name"],
-                )
-            elif kind == "manager":
-                start_background(
-                    handle_manager_message, bot, "whatsapp", event["chat_id"], event["text"],
-                    external_id=event["external_id"], author_name=event["author_name"],
-                    message_type=event["message_type"], media_url=event["media_url"],
-                )
+        # Тот же аккаунт Wazzup может обслуживать несколько номеров (по боту на номер)
+        account_bots = await asyncio.to_thread(load_account_bots, bot)
+        # Каждый номер — только одному боту (если в старых данных номер у двух ботов — боту из адреса)
+        used_channels = []
+        for target_bot in account_bots:
+            channel_id = target_bot.get("wazzup_channel_id")
+            if channel_id and channel_id in used_channels:
+                continue
+            used_channels.append(channel_id)
+            events = parse_wazzup_body(body, target_bot)
+            if target_bot.get("id") != bot.get("id"):
+                # Тестовый запрос Wazzup и ошибки доставки разбираем один раз — от бота из адреса
+                events = [e for e in events if e["kind"] not in ("test", "status_error")]
+            dispatch_wazzup_events(target_bot, events)
         return {"status": "ok"}
     except Exception as error:
         print(f"WAZZUP WEBHOOK ERROR: {error}")
         return {"status": "error", "detail": "Internal error"}
+
+
+def dispatch_wazzup_events(bot: dict, events: list[dict]) -> None:
+    """Запускает обработку событий одного бота в фоне."""
+    bot_id = bot["id"]
+    for event in events:
+        kind = event["kind"]
+        if kind == "channel_state":
+            save_channel_state(bot_id, event["state"])
+        elif kind == "status_error":
+            print(f"WAZZUP WEBHOOK: ошибка доставки messageId={event['message_id']} error={event['error']}")
+            start_background(handle_delivery_error, bot, event["message_id"], event["error"])
+        elif kind == "client":
+            start_background(
+                handle_client_message, bot, "whatsapp", event["chat_id"], event["text"],
+                message_type=event["message_type"], media_url=event["media_url"],
+                external_id=event["external_id"], contact_name=event["contact_name"],
+            )
+        elif kind == "manager":
+            start_background(
+                handle_manager_message, bot, "whatsapp", event["chat_id"], event["text"],
+                external_id=event["external_id"], author_name=event["author_name"],
+                message_type=event["message_type"], media_url=event["media_url"],
+            )
 
 
 # ============================================================

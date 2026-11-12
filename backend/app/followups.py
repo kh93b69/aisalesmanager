@@ -9,7 +9,8 @@
 - статус «новый» или «в работе» (горячими занимается сотрудник), ИИ не на паузе,
   не стоит «нужно внимание»;
 - последнее сообщение — от бота (клиент не ответил);
-- прошло нужное число часов и сейчас дневное время (9:00–21:00 по TIMEZONE).
+- прошло нужное число часов и сейчас рабочее время бота (если график не включён —
+  дневное время 9:00–21:00 по TIMEZONE).
 Когда клиент отвечает, счётчик дожимов сбрасывается (см. pipeline.handle_client_message).
 """
 import asyncio
@@ -20,6 +21,7 @@ from app.database import supabase
 from app.config import TIMEZONE
 from app import pipeline
 from app.messenger import send_to_client
+from app.work_hours import is_bot_working
 
 # Максимум шагов дожима и их параметры (те же ограничения проверяются при сохранении настроек)
 MAX_FOLLOWUP_STEPS = 3
@@ -63,6 +65,13 @@ def is_work_time(now: datetime) -> bool:
     return WORK_START_HOUR <= local.hour < WORK_END_HOUR
 
 
+def can_send_followup(bot: dict, now: datetime) -> bool:
+    """Можно ли сейчас писать дожимы: по графику бота, а без графика — днём (9:00–21:00)."""
+    if bot.get("work_hours_enabled"):
+        return is_bot_working(bot, now)
+    return is_work_time(now)
+
+
 def is_followup_due(dialog: dict, step: dict, now: datetime) -> bool:
     """Прошло ли нужное число часов с последнего сообщения диалога."""
     last_at = dialog.get("last_message_at")
@@ -97,7 +106,12 @@ def fetch_candidate_dialogs(bot_id: str, max_steps: int, min_hours: int, now: da
         .order("last_message_at") \
         .limit(DIALOGS_PER_PASS) \
         .execute()
-    return result.data or []
+    dialogs = []
+    for dialog in result.data or []:
+        # Клиент ждёт ответа после нерабочего времени — это не «замолчал», дожим не нужен
+        if not dialog.get("off_hours_since"):
+            dialogs.append(dialog)
+    return dialogs
 
 
 def claim_followup(dialog: dict) -> bool:
@@ -144,7 +158,9 @@ async def send_followup(bot: dict, dialog: dict, step: dict) -> None:
     async with lock:
         messages = pipeline.get_last_messages(dialog["id"])
         # Клиент мог ответить или сотрудник мог написать — тогда дожим не нужен
-        if not messages or messages[-1].get("role") != "assistant":
+        # Последнее настоящее сообщение (автоответ нерабочего времени не считается) — от бота
+        last = pipeline.last_real_message(messages)
+        if not last or last.get("role") != "assistant":
             return
         if not claim_followup(dialog):
             return
@@ -154,12 +170,15 @@ async def send_followup(bot: dict, dialog: dict, step: dict) -> None:
             print(f"FOLLOWUP: дожим не сформирован, диалог {dialog['id']}")
             return
 
+        # Пока ИИ писал текст, могло закончиться рабочее время — не пишем клиенту
+        if not can_send_followup(bot, datetime.now(timezone.utc)):
+            return
         # Пока ИИ писал текст, клиент мог ответить или сотрудник — забрать диалог
         fresh = pipeline.get_dialog(dialog["id"])
         if not fresh or fresh.get("ai_disabled") or fresh.get("status") not in ("new", "in_progress"):
             return
-        latest = pipeline.get_last_messages(dialog["id"])
-        if not latest or latest[-1].get("role") != "assistant":
+        latest = pipeline.last_real_message(pipeline.get_last_messages(dialog["id"]))
+        if not latest or latest.get("role") != "assistant" or fresh.get("off_hours_since"):
             return
 
         send_result = await send_to_client(bot, fresh, text, from_bot=True)
@@ -175,10 +194,10 @@ async def check_followups_once(now: datetime | None = None) -> None:
     """Один проход по всем ботам с включёнными дожимами."""
     if now is None:
         now = datetime.now(timezone.utc)
-    if not is_work_time(now):
-        return
 
     for bot in fetch_bots_with_followups():
+        if not can_send_followup(bot, now):
+            continue
         steps = clean_followup_steps(bot.get("followups"))
         if not steps:
             continue

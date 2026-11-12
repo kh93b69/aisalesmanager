@@ -21,6 +21,8 @@ from app import wazzup
 from app import notifier
 from app import pipeline
 from app import followups
+from app import work_hours
+from app import daily_report
 # Метка фрагмента «вопрос клиента — ответ руководителя» (раздел «Без ответа»)
 from app.routes.questions import QA_PREFIX
 
@@ -39,6 +41,16 @@ PROFILE_TEXT_FIELDS = {
     "target_action": ("Целевое действие", 500),
     "greeting_message": ("Приветствие", 1000),
     "sales_script": ("Скрипт продаж", 20000),
+    "off_hours_message": ("Автоответ в нерабочее время", 1000),
+    "payment_details": ("Реквизиты для оплаты", 1000),
+}
+
+# Поля-переключатели бота: поле → название для ошибки
+BOT_BOOL_FIELDS = {
+    "followups_enabled": "Дожимы",
+    "work_hours_enabled": "График работы",
+    "payment_enabled": "Оплата",
+    "daily_report_enabled": "Сводка дня",
 }
 
 # Ссылки, которые бот отправляет по ситуации
@@ -152,6 +164,68 @@ def validate_followups(raw_steps) -> list[dict]:
     return steps
 
 
+def validate_schedule(raw_schedule) -> list[dict]:
+    """График работы: ровно 7 дней (пн…вс) {"enabled", "start": "ЧЧ:ММ", "end": "ЧЧ:ММ"}. Ошибки — 400."""
+    if not isinstance(raw_schedule, list) or len(raw_schedule) != work_hours.DAYS_IN_WEEK:
+        raise HTTPException(status_code=400, detail="График работы — неверный формат (нужно 7 дней)")
+    schedule = []
+    for index, day in enumerate(raw_schedule):
+        day_name = work_hours.WEEKDAYS_SHORT[index]
+        if not isinstance(day, dict):
+            raise HTTPException(status_code=400, detail="График работы — неверный формат")
+        enabled = day.get("enabled")
+        if not isinstance(enabled, bool):
+            raise HTTPException(status_code=400, detail=f"График, {day_name}: укажите, рабочий ли день")
+        start = day.get("start")
+        end = day.get("end")
+        if work_hours.parse_hhmm(start) is None or work_hours.parse_hhmm(end) is None:
+            raise HTTPException(status_code=400, detail=f"График, {day_name}: время в формате ЧЧ:ММ, например 09:00")
+        # Приводим «9:5» к «09:05»
+        start_minutes = work_hours.parse_hhmm(start)
+        end_minutes = work_hours.parse_hhmm(end)
+        schedule.append({
+            "enabled": enabled,
+            "start": f"{start_minutes // 60:02d}:{start_minutes % 60:02d}",
+            "end": f"{end_minutes // 60:02d}:{end_minutes % 60:02d}",
+        })
+    return schedule
+
+
+def validate_url(value, title: str) -> str:
+    """Ссылка: пусто или адрес с http(s):// без пробелов. Ошибки — 400."""
+    if value is None:
+        return ""
+    if not isinstance(value, str):
+        raise HTTPException(status_code=400, detail=f"{title} — должно быть текстом")
+    url = value.strip()
+    if not url:
+        return ""
+    if not (url.startswith("https://") or url.startswith("http://")) or " " in url:
+        raise HTTPException(status_code=400, detail=f"{title}: адрес должен начинаться с https://")
+    if len(url) > MAX_LINK_URL:
+        raise HTTPException(status_code=400, detail=f"{title}: слишком длинный адрес")
+    return url
+
+
+def check_final_bot_state(bot: dict, fields: dict) -> None:
+    """
+    Проверка бота ПОСЛЕ изменений (сохранённые значения + новые): нельзя включить график
+    без рабочих дней или оплату без ссылки и реквизитов. Ошибки — 400.
+    """
+    final = dict(bot)
+    final.update(fields)
+    if final.get("work_hours_enabled"):
+        has_work_day = False
+        for day in work_hours.clean_schedule(final.get("work_schedule")):
+            if day["enabled"]:
+                has_work_day = True
+        if not has_work_day:
+            raise HTTPException(status_code=400, detail="Отметьте хотя бы один рабочий день")
+    if final.get("payment_enabled"):
+        if not str(final.get("payment_link") or "").strip() and not str(final.get("payment_details") or "").strip():
+            raise HTTPException(status_code=400, detail="Укажите ссылку на оплату или реквизиты")
+
+
 def validate_bot_update(data: dict) -> dict:
     """
     Белый список полей бота, которые может менять владелец.
@@ -227,10 +301,32 @@ def validate_bot_update(data: dict) -> dict:
     if "links" in data:
         clean["links"] = validate_links(data["links"])
 
-    if "followups_enabled" in data:
-        if not isinstance(data["followups_enabled"], bool):
-            raise HTTPException(status_code=400, detail="Дожимы: укажите, включены ли они")
-        clean["followups_enabled"] = data["followups_enabled"]
+    for field_name in BOT_BOOL_FIELDS:
+        if field_name in data:
+            if not isinstance(data[field_name], bool):
+                raise HTTPException(status_code=400, detail=f"{BOT_BOOL_FIELDS[field_name]}: укажите, включено ли")
+            clean[field_name] = data[field_name]
+
+    if "work_schedule" in data:
+        clean["work_schedule"] = validate_schedule(data["work_schedule"])
+        has_work_day = False
+        for day in clean["work_schedule"]:
+            if day["enabled"]:
+                has_work_day = True
+        if clean.get("work_hours_enabled") and not has_work_day:
+            raise HTTPException(status_code=400, detail="Отметьте хотя бы один рабочий день")
+
+    if "payment_link" in data:
+        clean["payment_link"] = validate_url(data["payment_link"], "Ссылка на оплату")
+    if clean.get("payment_enabled") and "payment_link" in clean and "payment_details" in clean:
+        if not clean["payment_link"] and not clean["payment_details"]:
+            raise HTTPException(status_code=400, detail="Укажите ссылку на оплату или реквизиты")
+
+    if "daily_report_time" in data:
+        minutes = work_hours.parse_hhmm(data["daily_report_time"])
+        if minutes is None:
+            raise HTTPException(status_code=400, detail="Время сводки — в формате ЧЧ:ММ, например 20:00")
+        clean["daily_report_time"] = f"{minutes // 60:02d}:{minutes % 60:02d}"
 
     if "followups" in data:
         clean["followups"] = validate_followups(data["followups"])
@@ -502,6 +598,27 @@ def get_text_chunk_ids(bot_id: str, city_id: str | None) -> list[str]:
     return ids
 
 
+def find_bot_by_channel(channel_id: str, except_bot_id: str) -> dict | None:
+    """Другой бот, к которому уже подключён этот номер (канал Wazzup)."""
+    result = supabase.table("bots").select("id, name, user_id") \
+        .eq("wazzup_channel_id", channel_id).execute()
+    for other in result.data or []:
+        if other.get("id") != except_bot_id:
+            return other
+    return None
+
+
+def find_bots_by_api_key(api_key: str) -> list[dict]:
+    """Боты, подключённые к аккаунту Wazzup с этим ключом (у которых есть секрет вебхука)."""
+    result = supabase.table("bots").select("id, user_id, wazzup_webhook_secret") \
+        .eq("wazzup_api_key", api_key).execute()
+    bots = []
+    for item in result.data or []:
+        if item.get("wazzup_webhook_secret"):
+            bots.append(item)
+    return bots
+
+
 def load_bot(bot_id: str) -> dict:
     """Перечитывает бота из БД (полная строка, с секретами — только для сервера)."""
     result = supabase.table("bots").select("*").eq("id", bot_id).limit(1).execute()
@@ -621,8 +738,42 @@ def update_bot(bot_id: str, data: dict, user: dict = Depends(get_current_user)):
     fields = validate_bot_update(data)
     if not fields:
         return {"bot": public_bot(access["bot"])}
+    check_final_bot_state(access["bot"], fields)
     bot = update_bot_row(bot_id, fields)
     return {"bot": public_bot(bot)}
+
+
+@router.get("/api/bots/{bot_id}/work-status")
+def work_status(bot_id: str, user: dict = Depends(get_current_user)):
+    """
+    Работает ли бот прямо сейчас по графику + местное время сервера.
+    Нужно, чтобы владелец видел: график применяется именно так, как он задумал.
+    """
+    access = require_bot_access(bot_id, user["id"])
+    bot = access["bot"]
+    local_now = work_hours.to_local()
+    next_start = work_hours.next_work_start(bot)
+    return {
+        "now": work_hours.format_local(local_now),
+        "timezone": str(local_now.tzinfo),
+        "utc_offset": local_now.strftime("%z"),
+        "schedule_enabled": bool(bot.get("work_hours_enabled")),
+        "working": work_hours.is_bot_working(bot),
+        "next_start": work_hours.format_local(next_start) if next_start else None,
+    }
+
+
+@router.post("/api/bots/{bot_id}/daily-report/test")
+async def daily_report_test(bot_id: str, user: dict = Depends(get_current_user)):
+    """Отправить сводку за сегодня прямо сейчас (проверка; дату отправки не меняет)."""
+    access = require_bot_access(bot_id, user["id"], owner_only=True)
+    bot = access["bot"]
+    if not str(bot.get("telegram_notify_chat_id") or "").strip():
+        raise HTTPException(status_code=400, detail="Сначала укажите и сохраните чат руководителя")
+    sent = await daily_report.send_daily_report(bot, work_hours.to_local())
+    if not sent:
+        return {"ok": False, "error": "Telegram не принял сообщение — проверьте chat_id и что бот уведомлений добавлен в чат"}
+    return {"ok": True}
 
 
 # ============================================================
@@ -636,8 +787,9 @@ async def wazzup_connect(bot_id: str, data: dict, user: dict = Depends(get_curre
     В БД ничего не сохраняем: ключ сохранится вместе с каналом в /wazzup/channel,
     чтобы проверка нового ключа не ломала рабочее подключение.
     """
-    require_bot_access(bot_id, user["id"], owner_only=True)
-    api_key = str(data.get("api_key") or "").strip()
+    access = require_bot_access(bot_id, user["id"], owner_only=True)
+    # Пустой ключ — берём сохранённый (смена номера без повторного ввода ключа)
+    api_key = str(data.get("api_key") or "").strip() or access["bot"].get("wazzup_api_key") or ""
     if not api_key:
         raise HTTPException(status_code=400, detail="Введите API-ключ Wazzup")
 
@@ -649,6 +801,16 @@ async def wazzup_connect(bot_id: str, data: dict, user: dict = Depends(get_curre
     error = ""
     if not channels:
         error = "В аккаунте Wazzup нет WhatsApp-каналов. Добавьте канал в личном кабинете Wazzup."
+
+    # Какие номера уже заняты другими ботами (один номер — один бот)
+    for channel in channels:
+        other = find_bot_by_channel(channel["channelId"], bot_id)
+        channel["used_by"] = None
+        if other:
+            if other.get("user_id") == user["id"]:
+                channel["used_by"] = other.get("name") or "другой бот"
+            else:
+                channel["used_by"] = "другой аккаунт сервиса"
     return {"ok": True, "channels": channels, "error": error}
 
 
@@ -677,6 +839,13 @@ async def wazzup_select_channel(bot_id: str, data: dict, user: dict = Depends(ge
     if not channel:
         return {"ok": False, "error": "Канал не найден в аккаунте Wazzup", "bot": public_bot(bot)}
 
+    # Один номер — один бот: иначе на одного клиента ответят два бота
+    other = find_bot_by_channel(channel_id, bot_id)
+    if other:
+        name = other.get("name") if other.get("user_id") == user["id"] else "другого аккаунта"
+        return {"ok": False, "error": f"Этот номер уже подключён к боту «{name}». Сначала отключите его там.",
+                "bot": public_bot(bot)}
+
     secret = bot.get("wazzup_webhook_secret") or wazzup.generate_webhook_secret()
 
     # Секрет сохраняем ДО подключения вебхука: Wazzup сразу пришлёт тестовый запрос с токеном
@@ -690,7 +859,21 @@ async def wazzup_select_channel(bot_id: str, data: dict, user: dict = Depends(ge
     })
 
     hook = await wazzup.set_webhook(api_key, wazzup.build_webhook_url(bot_id, secret))
+    # Бот перешёл на другой аккаунт Wazzup — другие номера старого аккаунта не должны остаться без вебхука
+    old_key = access["bot"].get("wazzup_api_key")
+    if old_key and old_key != api_key:
+        await repoint_account_webhook(old_key, user["id"])
     return {"ok": bool(hook.get("ok")), "error": hook.get("error") or "", "bot": public_bot(bot)}
+
+
+async def repoint_account_webhook(api_key: str, user_id: str) -> None:
+    """Направляет вебхук аккаунта Wazzup на любого оставшегося бота этого владельца с этим ключом."""
+    for other in find_bots_by_api_key(api_key):
+        if other.get("user_id") == user_id:
+            result = await wazzup.set_webhook(api_key, wazzup.build_webhook_url(other["id"], other["wazzup_webhook_secret"]))
+            if not result.get("ok"):
+                print(f"WAZZUP: не удалось перенаправить вебхук на бота {other['id']}: {result.get('error')}")
+            return
 
 
 @router.get("/api/bots/{bot_id}/wazzup/status")
@@ -719,23 +902,27 @@ async def wazzup_status(bot_id: str, user: dict = Depends(get_current_user)):
             supabase.table("bots").update({"wazzup_channel_state": fresh_state}).eq("id", bot_id).execute()
         status["state"] = fresh_state
 
-    secret = bot.get("wazzup_webhook_secret")
-    if secret:
-        hook = await wazzup.get_webhook(api_key)
-        if hook.get("ok"):
-            current_url = (hook.get("data") or {}).get("webhooksUri")
-            status["webhook_ok"] = current_url == wazzup.build_webhook_url(bot_id, secret)
+    # Вебхук у аккаунта Wazzup один: он может указывать на любого нашего бота с тем же ключом —
+    # сообщения всё равно дойдут до нужного бота по номеру (см. webhooks.load_account_bots)
+    hook = await wazzup.get_webhook(api_key)
+    if hook.get("ok"):
+        current_url = (hook.get("data") or {}).get("webhooksUri")
+        for account_bot in find_bots_by_api_key(api_key):
+            secret = account_bot.get("wazzup_webhook_secret")
+            if secret and current_url == wazzup.build_webhook_url(account_bot["id"], secret):
+                status["webhook_ok"] = True
 
     return status
 
 
 @router.post("/api/bots/{bot_id}/wazzup/disconnect")
-def wazzup_disconnect(bot_id: str, user: dict = Depends(get_current_user)):
+async def wazzup_disconnect(bot_id: str, user: dict = Depends(get_current_user)):
     """
     Отключает Wazzup: забываем ключ и канал.
     Секрет вебхука меняем — старый адрес вебхука перестанет проходить проверку токена.
     """
-    require_bot_access(bot_id, user["id"], owner_only=True)
+    access = require_bot_access(bot_id, user["id"], owner_only=True)
+    old_bot = access["bot"]
     bot = update_bot_row(bot_id, {
         "wazzup_api_key": None,
         "wazzup_channel_id": None,
@@ -743,6 +930,11 @@ def wazzup_disconnect(bot_id: str, user: dict = Depends(get_current_user)):
         "wazzup_channel_state": None,
         "wazzup_webhook_secret": wazzup.generate_webhook_secret(),
     })
+    # Другие номера этого же аккаунта Wazzup работают через общий вебхук — если он указывал
+    # на отключённого бота, переводим его на оставшегося бота аккаунта
+    api_key = old_bot.get("wazzup_api_key")
+    if api_key:
+        await repoint_account_webhook(api_key, user["id"])
     return {"ok": True, "bot": public_bot(bot)}
 
 

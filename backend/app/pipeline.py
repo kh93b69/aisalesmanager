@@ -17,11 +17,13 @@ from app.database import supabase
 from app.config import REPLY_DEBOUNCE_SECONDS, TIMEZONE
 from app.cities import get_bot_cities, detect_city
 from app.rag import get_knowledge_for_city
-from app.prompts import build_system_blocks, build_state_note, clean_contact_name
+from app.prompts import build_system_blocks, build_state_note, clean_contact_name, build_payment_message
 from app.ai_engine import generate_reply
 from app.messenger import send_to_client, split_images, was_sent_by_us, IMAGE_TAG_PATTERN
 from app.transcribe import transcribe_audio_url
-from app.notifier import notify_hot_lead, notify_attention, notify_text, notify_unknown_question
+from app.notifier import (notify_hot_lead, notify_attention, notify_text, notify_unknown_question,
+                          notify_payment_sent)
+from app.work_hours import is_bot_working
 
 # Сколько последних сообщений отдаём ИИ
 HISTORY_LIMIT = 30
@@ -57,6 +59,18 @@ MAX_TRANSCRIPTION_WAIT_SECONDS = 100
 AUTO_REPLY_WINDOW_SECONDS = 15
 # Пауза перед проверкой эха: ответ бота успевает сохраниться в БД
 ECHO_CHECK_DELAY_SECONDS = 3
+
+# Подпись автоответа «мы сейчас не работаем» (messages.author_name). Такие сообщения
+# не считаются ответом бота: после начала рабочего времени бот всё равно ответит клиенту.
+OFF_HOURS_AUTHOR = "Автоответ (нерабочее время)"
+
+# Сколько диалогов, ждавших начала рабочего времени, обрабатываем одновременно
+OFF_HOURS_BATCH_SIZE = 5
+# Сколько таких диалогов берём за один проход планировщика
+OFF_HOURS_DIALOGS_PER_PASS = 200
+
+# Статусы, при которых ссылку на оплату уже отправляли (или уже оплачено)
+PAYMENT_DONE_STATUSES = ["invoice_sent", "paid"]
 
 # Когда владельцу бота последний раз писали про исчерпанный лимит: bot_id → "ГГГГ-ММ-ДД" (UTC)
 _limit_notified = {}
@@ -94,6 +108,11 @@ def now_text(now: datetime | None = None) -> str:
     return f"{weekday}, {now.day} {month} {now.year}, {now.strftime('%H:%M')} ({TIMEZONE})"
 
 
+def is_service_message(message: dict) -> bool:
+    """Автоответ «мы сейчас не работаем» — не настоящий ответ бота (ИИ его не видит)."""
+    return message.get("author_name") == OFF_HOURS_AUTHOR
+
+
 def build_history(messages: list[dict]) -> list[dict]:
     """
     Превращает сообщения из БД (по возрастанию времени) в историю для Claude.
@@ -105,7 +124,7 @@ def build_history(messages: list[dict]) -> list[dict]:
     history = []
     for message in messages[-HISTORY_LIMIT:]:
         content = (message.get("content") or "").strip()
-        if not content:
+        if not content or is_service_message(message):
             continue
         role = message.get("role")
         if role == "user":
@@ -140,6 +159,8 @@ def last_user_text(messages: list[dict]) -> str:
     """Текст последних подряд идущих сообщений клиента (в конце переписки), через перевод строки."""
     parts = []
     for message in reversed(messages):
+        if is_service_message(message):
+            continue
         if message.get("role") != "user":
             break
         content = (message.get("content") or "").strip()
@@ -271,8 +292,20 @@ def is_limit_exceeded(subscription: dict | None, dialogs_this_month: int,
 
 
 def has_unanswered_user(messages: list[dict]) -> bool:
-    """Есть ли сообщение клиента новее последнего ответа бота/сотрудника (т.е. последнее — от клиента)."""
-    return bool(messages) and messages[-1].get("role") == "user"
+    """
+    Есть ли сообщение клиента новее последнего ответа бота/сотрудника (т.е. последнее — от клиента).
+    Автоответ «мы сейчас не работаем» ответом не считается.
+    """
+    last = last_real_message(messages)
+    return last is not None and last.get("role") == "user"
+
+
+def last_real_message(messages: list[dict]) -> dict | None:
+    """Последнее сообщение диалога, не считая автоответов нерабочего времени."""
+    for message in reversed(messages):
+        if not is_service_message(message):
+            return message
+    return None
 
 
 def find_index_by_id(messages: list[dict], message_id) -> int:
@@ -323,7 +356,7 @@ def build_kb_query(messages: list[dict]) -> str:
     last_bot_text = ""
     for message in reversed(messages):
         content = (message.get("content") or "").strip()
-        if not content:
+        if not content or is_service_message(message):
             continue
         role = message.get("role")
         if role == "user" and len(user_texts) < KB_QUERY_USER_MESSAGES:
@@ -784,7 +817,10 @@ async def handle_manager_message(bot: dict, channel: str, chat_id: str, text: st
             return
 
         # 4. Автопауза ИИ: сотрудник перехватил диалог
+        # Сотрудник ответил сам — ждать рабочего времени боту больше не нужно
         fields = {"needs_attention": False}
+        if dialog.get("off_hours_since"):
+            fields["off_hours_since"] = None
         if not dialog.get("ai_disabled"):
             fields["ai_disabled"] = True
             fields["ai_paused_reason"] = "manager_replied"
@@ -843,8 +879,15 @@ async def handle_delivery_error(bot: dict, external_id: str, error) -> None:
         supabase.table("messages").update({"send_error": error_text}).eq("id", message["id"]).execute()
 
         dialog = get_dialog(message["dialog_id"])
-        if not dialog or dialog.get("bot_id") != bot.get("id"):
+        if not dialog:
             return
+        if dialog.get("bot_id") != bot.get("id"):
+            # Сообщение другого номера того же аккаунта Wazzup — обрабатываем от его бота
+            dialog_bot = get_bot(dialog["bot_id"])
+            if not dialog_bot or not bot.get("wazzup_api_key") \
+                    or dialog_bot.get("wazzup_api_key") != bot.get("wazzup_api_key"):
+                return
+            bot = dialog_bot
         print(f"PIPELINE: сообщение не доставлено, диалог {dialog['id']}: {error_text}")
         if dialog.get("needs_attention"):
             # Не спамим: флаг уже стоит
@@ -928,18 +971,35 @@ async def _reply_once(bot_id: str, dialog_id: str, answered_user_id=None):
     if dialog.get("ai_disabled"):
         return None
 
+    # График работы. Отметку «ждёт рабочего времени» снимаем только когда ответ отправлен
+    # (или отвечать не на что) — иначе при сбое/перезапуске клиент остался бы без ответа.
+    working = is_bot_working(bot)
+    was_waiting = bool(dialog.get("off_hours_since"))
+
     # 2. Есть ли на что отвечать
     messages = get_last_messages(dialog_id)
+    nothing_to_answer = False
     if answered_user_id:
         if not has_user_after(messages, answered_user_id):
-            return None
-        messages = reorder_after_answered(messages, answered_user_id)
+            nothing_to_answer = True
+        else:
+            messages = reorder_after_answered(messages, answered_user_id)
     elif not has_unanswered_user(messages):
-        return None
+        nothing_to_answer = True
     history = build_history(messages)
-    if not history or history[-1]["role"] != "user":
+    if not nothing_to_answer and (not history or history[-1]["role"] != "user"):
+        nothing_to_answer = True
+    if nothing_to_answer:
+        if working and was_waiting:
+            update_dialog(dialog_id, {"off_hours_since": None})
         return None
-    last_user_id = messages[-1].get("id")
+    last_user_id = last_user_message_id(messages)
+
+    # Нерабочее время: ИИ не вызываем и клиенту не пишем (кроме одного автоответа, если он задан).
+    # Ответим, когда начнётся рабочее время (планировщик → answer_after_off_hours_once)
+    if not working:
+        await hold_until_work_time(bot, dialog)
+        return None
     kb_query = build_kb_query(messages)
     first_reply = is_first_reply(messages)
 
@@ -973,13 +1033,28 @@ async def _reply_once(bot_id: str, dialog_id: str, answered_user_id=None):
         print(f"PIPELINE: диалог {dialog_id} перехвачен во время генерации — не отправляем")
         return None
     dialog = fresh
+    # Пока ИИ думал, рабочее время могло закончиться — тогда не отправляем (ответим позже)
+    if not is_bot_working(bot):
+        print(f"PIPELINE: рабочее время закончилось во время генерации, диалог {dialog_id} — ответим позже")
+        await hold_until_work_time(bot, dialog)
+        return None
 
     team = get_team(bot_id)
     fields = {}
     attention_reason = ""
+    # Клиент ждал рабочего времени — сейчас отвечаем, отметку снимаем
+    if dialog.get("off_hours_since"):
+        fields["off_hours_since"] = None
 
-    # 8. Отправка клиенту
+    # 8. Отправка клиенту. Клиент готов оплатить → в конец ответа добавляем ссылку на оплату
+    # и реквизиты из настроек (сам ИИ ссылку не пишет — так она всегда точная)
     reply = strip_staff_prefix(result.get("reply") or "")
+    payment_message = ""
+    if reply and result.get("send_payment"):
+        payment_message = build_payment_message(bot)
+        if payment_message:
+            reply = reply + "\n\n" + payment_message
+    payment_sent = False
     if reply:
         send_result = await send_to_client(bot, dialog, reply, from_bot=True)
         send_error = None
@@ -987,6 +1062,8 @@ async def _reply_once(bot_id: str, dialog_id: str, answered_user_id=None):
             send_error = send_result.get("error") or "неизвестная ошибка"
             print(f"PIPELINE ERROR: не удалось отправить ответ в диалог {dialog_id}: {send_error}")
             attention_reason = f"Не удалось отправить ответ: {send_error}"
+        elif payment_message:
+            payment_sent = True
         save_message(dialog_id, "assistant", reply, send_error=send_error,
                      external_id=send_result.get("message_id") or None)
     else:
@@ -1000,20 +1077,28 @@ async def _reply_once(bot_id: str, dialog_id: str, answered_user_id=None):
     if client_name and client_name != dialog.get("contact_name"):
         fields["contact_name"] = client_name
 
-    # 10. Горячий лид
+    # 10. Ссылка на оплату отправлена → статус «Счёт отправлен» (сотрудник проверит оплату).
+    # Иначе — обычный горячий лид: сотрудник оформит счёт сам.
     became_hot = False
-    if result.get("lead_status") == "hot" and dialog.get("status") not in HOT_OR_LATER_STATUSES:
+    payment_new = False
+    if payment_sent and dialog.get("status") not in PAYMENT_DONE_STATUSES:
+        payment_new = True
+        now_iso = utc_now_iso()
+        fields["status"] = "invoice_sent"
+        fields["invoice_sent_at"] = now_iso
+        if not dialog.get("hot_at"):
+            fields["hot_at"] = now_iso
+        fields["hot_reason"] = result.get("lead_summary") or dialog.get("hot_reason") or ""
+        fields["needs_attention"] = False
+        assign_round_robin(bot, dialog, team, city, fields)
+    elif result.get("lead_status") == "hot" and dialog.get("status") not in HOT_OR_LATER_STATUSES:
         became_hot = True
         fields["status"] = "hot"
         fields["hot_at"] = utc_now_iso()
         fields["hot_reason"] = result.get("lead_summary") or ""
         fields["reminder_count"] = 0
         fields["needs_attention"] = False
-        if bot.get("assignment_mode") == "round_robin" and not dialog.get("assigned_user_id"):
-            member = pick_round_robin(team, city["id"] if city else None)
-            if member:
-                fields["assigned_user_id"] = member.get("user_id")
-                mark_member_assigned(member["id"])
+        assign_round_robin(bot, dialog, team, city, fields)
 
     # 11. Вопрос, на который нет ответа в базе знаний: сохраняем (руководитель ответит в панели,
     # ответ попадёт в базу знаний) и сразу уведомляем руководителя
@@ -1052,6 +1137,12 @@ async def _reply_once(bot_id: str, dialog_id: str, answered_user_id=None):
             await notify_hot_lead(bot, dialog, city, team, dialog.get("hot_reason") or "")
         except Exception as error:
             print(f"PIPELINE ERROR: notify_hot_lead: {error}")
+    if payment_new:
+        print(f"PIPELINE: клиенту отправлена ссылка на оплату, диалог {dialog_id}")
+        try:
+            await notify_payment_sent(bot, dialog, city, team, dialog.get("hot_reason") or "")
+        except Exception as error:
+            print(f"PIPELINE ERROR: notify_payment_sent: {error}")
     if notify_needed and not unknown_notified:
         try:
             await notify_attention(bot, dialog, city, team, attention_reason)
@@ -1061,10 +1152,107 @@ async def _reply_once(bot_id: str, dialog_id: str, answered_user_id=None):
     return last_user_id
 
 
+def assign_round_robin(bot: dict, dialog: dict, team: list[dict], city: dict | None, fields: dict) -> None:
+    """Режим «по очереди»: назначаем ответственного сотрудника (пишет в fields)."""
+    if bot.get("assignment_mode") != "round_robin" or dialog.get("assigned_user_id"):
+        return
+    member = pick_round_robin(team, city["id"] if city else None)
+    if member:
+        fields["assigned_user_id"] = member.get("user_id")
+        mark_member_assigned(member["id"])
+
+
+def last_user_message_id(messages: list[dict]):
+    """id последнего сообщения клиента."""
+    for message in reversed(messages):
+        if message.get("role") == "user":
+            return message.get("id")
+    return None
+
+
+async def hold_until_work_time(bot: dict, dialog: dict) -> None:
+    """
+    Нерабочее время: отмечаем, что клиент ждёт ответа (бот ответит, когда начнётся рабочее время),
+    и один раз за нерабочий период отправляем автоответ, если он задан в настройках.
+    """
+    if dialog.get("off_hours_since"):
+        # Уже отмечен — автоответ в этот нерабочий период уже был
+        return
+    update_dialog(dialog["id"], {"off_hours_since": utc_now_iso()})
+    dialog["off_hours_since"] = utc_now_iso()
+    print(f"PIPELINE: нерабочее время, диалог {dialog['id']} — ответим, когда начнётся рабочее время")
+
+    text = (bot.get("off_hours_message") or "").strip()
+    if not text:
+        return
+    send_result = await send_to_client(bot, dialog, text, from_bot=True)
+    send_error = None
+    if not send_result.get("ok"):
+        send_error = send_result.get("error") or "неизвестная ошибка"
+        print(f"PIPELINE ERROR: автоответ нерабочего времени не отправлен, диалог {dialog['id']}: {send_error}")
+    save_message(dialog["id"], "assistant", text, send_error=send_error,
+                 external_id=send_result.get("message_id") or None, author_name=OFF_HOURS_AUTHOR)
+
+
+def find_working_bot_ids() -> list[str]:
+    """id ботов, которые прямо сейчас в рабочем времени (или без графика)."""
+    result = supabase.table("bots").select("id, work_hours_enabled, work_schedule").execute()
+    ids = []
+    for bot in result.data or []:
+        if is_bot_working(bot):
+            ids.append(bot["id"])
+    return ids
+
+
+def find_waiting_off_hours_dialogs(bot_ids: list[str]) -> list[dict]:
+    """Диалоги этих ботов, где клиент написал в нерабочее время и ждёт ответа."""
+    if not bot_ids:
+        return []
+    result = supabase.table("dialogs") \
+        .select("id, bot_id") \
+        .in_("bot_id", bot_ids) \
+        .gte("off_hours_since", "2000-01-01T00:00:00+00:00") \
+        .eq("ai_disabled", False) \
+        .order("off_hours_since") \
+        .limit(OFF_HOURS_DIALOGS_PER_PASS) \
+        .execute()
+    return result.data or []
+
+
+# Фоновая задача, которая сейчас отвечает ждавшим клиентам (чтобы не запускать вторую параллельно)
+_off_hours_task = None
+
+
+async def answer_waiting_dialogs(dialogs: list[dict]) -> None:
+    """Отвечает ждавшим клиентам пачками по OFF_HOURS_BATCH_SIZE (чтобы не упереться в лимиты ИИ)."""
+    for start in range(0, len(dialogs), OFF_HOURS_BATCH_SIZE):
+        batch = dialogs[start:start + OFF_HOURS_BATCH_SIZE]
+        tasks = []
+        for dialog in batch:
+            tasks.append(process_dialog_reply(dialog["bot_id"], dialog["id"]))
+        await asyncio.gather(*tasks, return_exceptions=True)
+
+
+async def answer_after_off_hours_once() -> None:
+    """
+    Из планировщика раз в минуту: у каких ботов началось рабочее время — отвечаем клиентам,
+    которые написали ночью/в выходной. Сам ответ всё равно проверяет график (_reply_once).
+    """
+    global _off_hours_task
+    if _off_hours_task is not None and not _off_hours_task.done():
+        return
+    # Сначала — какие боты сейчас работают, и только их диалоги: иначе очередь могли бы занять
+    # диалоги ботов, у которых ещё ночь/выходной
+    ready = find_waiting_off_hours_dialogs(find_working_bot_ids())
+    if ready:
+        print(f"PIPELINE: началось рабочее время — отвечаем ждавшим клиентам: {len(ready)}")
+        _off_hours_task = asyncio.create_task(answer_waiting_dialogs(ready))
+
+
 def is_first_reply(messages: list[dict]) -> bool:
     """Бот и сотрудники ещё ни разу не писали в этом диалоге (среди загруженных сообщений)."""
     for message in messages:
-        if message.get("role") in ("assistant", "manager"):
+        if message.get("role") in ("assistant", "manager") and not is_service_message(message):
             return False
     return True
 
@@ -1129,7 +1317,8 @@ async def recover_unanswered_dialogs() -> None:
         since = (datetime.now(timezone.utc) - timedelta(minutes=RECOVERY_WINDOW_MINUTES)).isoformat()
         tasks = []
         for dialog in find_recent_active_dialogs(since):
-            last = get_last_messages(dialog["id"], limit=1)
+            # Берём несколько последних: самым последним может быть автоответ нерабочего времени
+            last = get_last_messages(dialog["id"], limit=5)
             if has_unanswered_user(last):
                 tasks.append(process_dialog_reply(dialog["bot_id"], dialog["id"]))
         print(f"PIPELINE: восстановление после перезапуска — диалогов без ответа: {len(tasks)}")

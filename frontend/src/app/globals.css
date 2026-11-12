@@ -1809,3 +1809,14 @@ code {
 .link-row .input { width: 100%; }
 .question-meta a { color: var(--primary); }
 .checkbox-row { font-size: 14px; }
+
+/* ---------- График работы ---------- */
+.work-schedule { display: flex; flex-direction: column; gap: 8px; margin: 12px 0; }
+.work-day { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.work-day-name { min-width: 150px; margin: 0; }
+.work-day .work-time { width: 120px; }
+.work-day-off .work-time { opacity: 0.5; }
+.work-day-hint { font-size: 12px; }
+
+/* Номер WhatsApp уже занят другим ботом */
+.channel-used { font-size: 12px; color: var(--text-muted); margin-top: 4px; }

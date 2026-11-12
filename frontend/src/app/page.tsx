@@ -217,7 +217,9 @@ export default function Dashboard() {
           >
             {bots.map((b) => (
               <option key={b.id} value={b.id}>
-                {b.name}{b.my_role === "manager" ? " (сотрудник)" : ""}
+                {b.name}
+                {b.wazzup_channel_phone ? ` · +${b.wazzup_channel_phone}` : ""}
+                {b.my_role === "manager" ? " (сотрудник)" : ""}
               </option>
             ))}
           </select>

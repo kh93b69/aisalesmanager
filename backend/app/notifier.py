@@ -255,6 +255,20 @@ async def notify_hot_lead(bot: dict, dialog: dict, city: dict | None, team: list
     return await _send_to_all(recipients, text_html, "горячий клиент")
 
 
+async def notify_payment_sent(bot: dict, dialog: dict, city: dict | None, team: list[dict], summary: str) -> bool:
+    """«💳 Клиенту отправлена ссылка на оплату» — сотрудник проверяет поступление и отмечает «Оплачено»."""
+    lines = ["💳 <b>Клиенту отправлена ссылка на оплату</b>"]
+    lines += _client_lines(dialog, city)
+    if summary and summary.strip():
+        lines.append(f"💬 Оплачивает: {html.escape(_short(summary))}")
+    lines.append("Проверьте поступление и отметьте в панели «Оплачено».")
+    lines.append(_link_line(dialog))
+    text_html = "\n".join(lines)
+
+    recipients = get_recipients(bot, city, team, (dialog or {}).get("assigned_user_id"), escalation=False)
+    return await _send_to_all(recipients, text_html, "ссылка на оплату")
+
+
 async def notify_reminder(bot: dict, dialog: dict, city: dict | None, team: list[dict],
                           minutes: int, escalation: bool) -> bool:
     """

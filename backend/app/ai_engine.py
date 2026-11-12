@@ -50,6 +50,7 @@ def build_reply_schema(city_names: list[str]) -> dict:
             "need_human_reason": {"type": "string"},
             "client_name": {"type": "string"},
             "unknown_question": {"type": "string"},
+            "send_payment": {"type": "boolean"},
         },
         "required": [
             "reply",
@@ -60,6 +61,7 @@ def build_reply_schema(city_names: list[str]) -> dict:
             "need_human_reason",
             "client_name",
             "unknown_question",
+            "send_payment",
         ],
         "additionalProperties": False,
     }
@@ -133,6 +135,7 @@ def make_fallback(reason: str, usage: dict | None = None) -> dict:
         "need_human_reason": reason,
         "client_name": "",
         "unknown_question": "",
+        "send_payment": False,
         "ok": False,
         "usage": usage or empty_usage(),
     }
@@ -198,6 +201,7 @@ def parse_response(response, city_names: list[str]) -> dict:
         "client_name": str(data.get("client_name") or "").strip(),
         # Вопрос без ответа в базе знаний — не длиннее 500 символов
         "unknown_question": str(data.get("unknown_question") or "").strip()[:500],
+        "send_payment": data.get("send_payment") is True,
         "ok": True,
         "usage": usage,
     }

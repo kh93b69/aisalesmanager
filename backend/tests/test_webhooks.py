@@ -32,6 +32,8 @@ def make_client(monkeypatch, bot=None):
 
     monkeypatch.setattr(webhooks, "start_background", fake_start_background)
     monkeypatch.setattr(webhooks, "load_bot", lambda bot_id: dict(bot) if bot_id == "b1" else None)
+    # Один бот на аккаунт Wazzup (другие номера — в отдельном тесте)
+    monkeypatch.setattr(webhooks, "load_account_bots", lambda bot_arg: [bot_arg])
     monkeypatch.setattr(webhooks, "save_channel_state",
                         lambda bot_id, state: calls["state"].append((bot_id, state)))
     app = FastAPI()

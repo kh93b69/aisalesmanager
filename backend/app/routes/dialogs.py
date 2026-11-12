@@ -419,6 +419,9 @@ async def send_message(dialog_id: str, data: dict, user: dict = Depends(get_curr
     # Сотрудник отвечает сам — ставим ИИ на паузу ДО отправки, чтобы бот не ответил параллельно.
     # Причину 'limit' и т.п. не затираем. При ошибке отправки паузу не откатываем.
     fields = {"needs_attention": False}
+    # Сотрудник ответил сам — клиент больше не ждёт рабочего времени бота
+    if dialog.get("off_hours_since"):
+        fields["off_hours_since"] = None
     if not dialog.get("ai_disabled"):
         fields["ai_disabled"] = True
         fields["ai_paused_reason"] = "manager_replied"

@@ -39,6 +39,9 @@ function ReplyInfo({ info }: { info: TestChatReply }) {
   return (
     <div className="test-chat-info">
       {info.city_name && <span className="test-chat-tag">📍 {info.city_name}</span>}
+      {info.payment_sent && (
+        <span className="test-chat-tag test-chat-tag-hot">💳 Отправлена ссылка на оплату</span>
+      )}
       {info.lead_status === "hot" && (
         <span className="test-chat-tag test-chat-tag-hot">
           🔥 Горячий клиент{info.lead_summary ? `: ${info.lead_summary}` : ""}
@@ -72,6 +75,8 @@ export default function TestChatSection({ bot, cities }: Props) {
   const [cityId, setCityId] = useState("");
   // Клиент уже стал «горячим» — дальше бот не продаёт повторно (как в WhatsApp)
   const [isHot, setIsHot] = useState(false);
+  // Бот уже отправил ссылку на оплату (статус «Счёт отправлен»)
+  const [paymentSent, setPaymentSent] = useState(false);
   const [sending, setSending] = useState(false);
   const [error, setError] = useState("");
   const scrollRef = useRef<HTMLDivElement>(null);
@@ -81,6 +86,7 @@ export default function TestChatSection({ bot, cities }: Props) {
     setItems([]);
     setCityId("");
     setIsHot(false);
+    setPaymentSent(false);
     setError("");
   }, [bot.id]);
 
@@ -103,12 +109,13 @@ export default function TestChatSection({ bot, cities }: Props) {
       const data = await apiPost<TestChatReply>(`/api/bots/${bot.id}/test-chat`, {
         messages: withUser.map((item) => ({ role: item.role, content: item.content })),
         city_id: cityId || null,
-        status: isHot ? "hot" : "in_progress",
+        status: paymentSent ? "invoice_sent" : isHot ? "hot" : "in_progress",
       });
       setItems([...withUser, { role: "assistant", content: data.reply, info: data }]);
       // Бот определил город — дальше тестируем в нём (как диалог в WhatsApp)
       if (data.city_id) setCityId(data.city_id);
       if (data.lead_status === "hot") setIsHot(true);
+      if (data.payment_sent) setPaymentSent(true);
     } catch (err) {
       setError(errorText(err));
       // Сообщение не потеряно: возвращаем его в поле ввода
@@ -122,6 +129,7 @@ export default function TestChatSection({ bot, cities }: Props) {
     setItems([]);
     setCityId("");
     setIsHot(false);
+    setPaymentSent(false);
     setError("");
   };
 

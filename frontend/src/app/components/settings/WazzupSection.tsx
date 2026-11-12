@@ -111,6 +111,29 @@ export default function WazzupSection({ bot, onBotUpdated }: Props) {
     setBusy(false);
   };
 
+  // Сменить номер: список каналов по уже сохранённому ключу (ключ вводить заново не нужно)
+  const loadSavedChannels = async () => {
+    setBusy(true);
+    setError("");
+    setInfo("");
+    try {
+      const data = await apiPost<{ ok: boolean; channels?: WazzupChannel[]; error?: string }>(
+        `/api/bots/${bot.id}/wazzup/connect`,
+        {}
+      );
+      if (!data.ok) {
+        setError(data.error || "Не удалось получить номера из Wazzup");
+      } else {
+        setShowSetup(true);
+        setChannels(data.channels || []);
+        setVerifiedKey("");
+      }
+    } catch (err) {
+      setError(errorText(err));
+    }
+    setBusy(false);
+  };
+
   // Шаг 2: подключить выбранный канал (бэкенд сохранит ключ и сам настроит вебхук).
   // useKey=false — переподключение текущего канала со старым ключом (передаём только channel_id)
   const connectChannel = async (channelId: string, useKey: boolean) => {
@@ -211,8 +234,13 @@ export default function WazzupSection({ bot, onBotUpdated }: Props) {
           </button>
         )}
         {connected && !showSetup && (
+          <button className="btn btn-sm btn-outline" onClick={loadSavedChannels} disabled={busy}>
+            Выбрать другой номер
+          </button>
+        )}
+        {connected && !showSetup && (
           <button className="btn btn-sm btn-outline" onClick={() => setShowSetup(true)} disabled={busy}>
-            Сменить ключ или канал
+            Сменить ключ Wazzup
           </button>
         )}
         {connected && (
@@ -244,7 +272,9 @@ export default function WazzupSection({ bot, onBotUpdated }: Props) {
 
           {channels && channels.length > 0 && (
             <div className="form-group">
-              <label>2. Выберите канал WhatsApp</label>
+              <label>2. Выберите номер WhatsApp для этого бота</label>
+              <div className="hint" style={{ marginBottom: 8 }}>Один номер — один бот. Для второго номера создайте ещё одного бота
+                (кнопка «+ Бот» вверху) и выберите номер там — ключ Wazzup тот же.</div>
               <div className="channel-list">
                 {channels.map((ch) => {
                   const chState = wazzupStateInfo(ch.state);
@@ -253,9 +283,14 @@ export default function WazzupSection({ bot, onBotUpdated }: Props) {
                       <div>
                         <div className="channel-phone">{ch.plainId ? formatPhone(ch.plainId) : ch.channelId}</div>
                         <span className={`wa-status-badge wa-small ${chState.cls}`}>{chState.text}</span>
+                        {ch.used_by && <div className="channel-used">Подключён к боту «{ch.used_by}»</div>}
                       </div>
-                      <button className="btn btn-sm btn-primary" onClick={() => connectChannel(ch.channelId, true)} disabled={busy}>
-                        {status?.channel_id === ch.channelId ? "Переподключить" : "Подключить"}
+                      <button
+                        className="btn btn-sm btn-primary"
+                        onClick={() => connectChannel(ch.channelId, true)}
+                        disabled={busy || Boolean(ch.used_by)}
+                      >
+                        {status?.channel_id === ch.channelId ? "Переподключить" : ch.used_by ? "Занят" : "Подключить"}
                       </button>
                     </div>
                   );

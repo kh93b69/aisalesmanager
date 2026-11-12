@@ -1,5 +1,7 @@
 """
-Планировщик: напоминания о счёте и дожимы (followups.py).
+Планировщик (раз в минуту): напоминания о счёте, дожимы (followups.py),
+ответы клиентам после нерабочего времени (pipeline.answer_after_off_hours_once)
+и сводка дня руководителю (daily_report.py).
 
 Раз в минуту смотрим горячие диалоги (status='hot'). Если сотрудник не ответил клиенту:
 - через N минут после hot_at — напоминание ответственным;
@@ -15,6 +17,8 @@ from datetime import datetime, timezone
 from app.database import supabase
 from app.notifier import notify_reminder
 from app.followups import check_followups_once
+from app.daily_report import check_daily_reports_once
+from app.pipeline import answer_after_off_hours_once
 
 # Размер страницы при выборке диалогов (PostgREST отдаёт не больше 1000 строк)
 PAGE_SIZE = 500
@@ -183,4 +187,18 @@ async def run_scheduler_forever() -> None:
             raise
         except Exception as error:
             print(f"SCHEDULER ERROR: дожимы: {error}")
+        # Началось рабочее время бота — ответить клиентам, которые писали ночью/в выходной
+        try:
+            await answer_after_off_hours_once()
+        except asyncio.CancelledError:
+            raise
+        except Exception as error:
+            print(f"SCHEDULER ERROR: ответы после нерабочего времени: {error}")
+        # Сводка дня руководителю в Telegram
+        try:
+            await check_daily_reports_once()
+        except asyncio.CancelledError:
+            raise
+        except Exception as error:
+            print(f"SCHEDULER ERROR: сводка дня: {error}")
         await asyncio.sleep(CHECK_INTERVAL_SECONDS)
