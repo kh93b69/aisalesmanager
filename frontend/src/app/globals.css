@@ -1565,7 +1565,7 @@ code {
 
 .image-grid {
   display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(110px, 1fr));
+  grid-template-columns: repeat(auto-fill, minmax(180px, 1fr));
   gap: 12px;
   margin-top: 16px;
 }
@@ -1820,3 +1820,10 @@ code {
 
 /* Номер WhatsApp уже занят другим ботом */
 .channel-used { font-size: 12px; color: var(--text-muted); margin-top: 4px; }
+
+/* Описание картинки бота */
+.image-description { width: 100%; margin-top: 6px; font-size: 12px; resize: vertical; min-height: 54px; }
+.image-saved { font-size: 12px; margin-top: 2px; }
+
+/* Ссылки в сообщениях — видны и на фиолетовом пузыре бота */
+.message-text a { color: inherit; text-decoration: underline; word-break: break-all; }

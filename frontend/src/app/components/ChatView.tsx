@@ -48,6 +48,23 @@ function splitImages(content: string): { text: string; images: string[] } {
   return { text: text.trim(), images };
 }
 
+// Текст как в WhatsApp: *жирный* — жирным, ссылки — кликабельными (без вставки HTML).
+// Ссылки кликабельны только у бота и сотрудников: ссылку от клиента может прислать кто угодно.
+const TEXT_PARTS = /(\*[^*\n]+\*|https?:\/\/[^\s\]]+[^\s\].,!?:;)])/g;
+
+function renderWhatsAppText(text: string, linksClickable: boolean) {
+  const parts = text.split(TEXT_PARTS);
+  return parts.map((part, index) => {
+    if (linksClickable && (part.startsWith("http://") || part.startsWith("https://"))) {
+      return <a key={index} href={part} target="_blank" rel="noreferrer">{part}</a>;
+    }
+    if (part.length > 2 && part.startsWith("*") && part.endsWith("*")) {
+      return <b key={index}>{part.slice(1, -1)}</b>;
+    }
+    return part;
+  });
+}
+
 // Кнопки смены статуса в зависимости от текущего статуса
 function statusActions(status: DialogStatus): { status: DialogStatus; label: string; cls: string }[] {
   if (status === "paid" || status === "lost") {
@@ -79,7 +96,7 @@ function MessageBubble({ msg }: { msg: Message }) {
   const mediaUrl = msg.media_url && msg.media_url.startsWith("https://") ? msg.media_url : null;
 
   let author = "Клиент";
-  if (msg.role === "assistant") author = "🤖 ИИ-менеджер";
+  if (msg.role === "assistant") author = msg.author_name ? `🤖 ${msg.author_name}` : "🤖 ИИ-менеджер";
   if (msg.role === "manager") author = `👤 ${msg.author_name || "Сотрудник"}`;
 
   return (
@@ -100,7 +117,7 @@ function MessageBubble({ msg }: { msg: Message }) {
             📎 {type === "video" ? "Видео" : type === "document" ? "Документ" : "Вложение"} — открыть
           </a>
         )}
-        {text && <div className="message-text">{text}</div>}
+        {text && <div className="message-text">{renderWhatsAppText(text, msg.role !== "user")}</div>}
         {/* Картинки, которые отправил бот */}
         {images.map((url) => (
           <a key={url} href={url} target="_blank" rel="noreferrer">
@@ -149,6 +166,8 @@ export default function ChatView({ dialogId, cities, isOwner, lockedCityId, onCh
     let cancelled = false;
     // Предыдущий запрос ещё идёт — новый не отправляем
     let inFlight = false;
+    // Сколько автообновлений подряд не удалось: одиночный сбой связи не показываем
+    let failures = 0;
     const load = (force: boolean) => {
       if (inFlight) return;
       // Вкладка свёрнута — не опрашиваем сервер зря
@@ -160,9 +179,11 @@ export default function ChatView({ dialogId, cities, isOwner, lockedCityId, onCh
           setMessages(data.messages || []);
           if (data.dialog) setDialog(data.dialog);
           setLoadError("");
+          failures = 0;
         })
         .catch((err) => {
-          if (!cancelled) setLoadError(errorText(err));
+          failures += 1;
+          if (!cancelled && (force || failures >= 3)) setLoadError(errorText(err));
         })
         .finally(() => {
           inFlight = false;

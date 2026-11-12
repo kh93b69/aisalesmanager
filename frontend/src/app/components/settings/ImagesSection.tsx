@@ -3,7 +3,7 @@
 // Настройки → Картинки: бот может отправлять их клиентам (прайс, схема проезда и т.п.).
 
 import { useEffect, useRef, useState } from "react";
-import { apiDelete, apiRequest, Bot, BotImage, errorText } from "../api";
+import { apiDelete, apiPut, apiRequest, Bot, BotImage, errorText } from "../api";
 
 type Props = {
   bot: Bot;
@@ -60,6 +60,23 @@ export default function ImagesSection({ bot }: Props) {
     if (fileRef.current) fileRef.current.value = "";
   };
 
+  // Описание картинки: по нему бот решает, когда её отправить
+  const [drafts, setDrafts] = useState<Record<string, string>>({});
+  const [savedId, setSavedId] = useState("");
+
+  const saveName = async (image: BotImage) => {
+    const name = (drafts[image.id] ?? image.name).trim();
+    if (!name || name === image.name) return;
+    setError("");
+    try {
+      const data = await apiPut<BotImage>(`/api/images/${image.id}`, { name });
+      setImages((prev) => prev.map((i) => (i.id === image.id ? { ...i, name: data.name } : i)));
+      setSavedId(image.id);
+    } catch (err) {
+      setError(errorText(err));
+    }
+  };
+
   const remove = async (image: BotImage) => {
     if (!confirm(`Удалить картинку «${image.name}»? Бот больше не сможет её отправлять.`)) return;
     setError("");
@@ -74,7 +91,9 @@ export default function ImagesSection({ bot }: Props) {
   return (
     <div className="settings-section">
       <h3>Картинки</h3>
-      <p>Бот сможет отправлять эти картинки клиентам (прайс, схема проезда, фото кабинета). Называйте файлы понятно — по имени бот выбирает картинку.</p>
+      <p>Бот сможет отправлять эти картинки клиентам: кейсы, отзывы, примеры работ, прайс, схема проезда.
+        Под каждой картинкой напишите, что на ней и когда её отправлять — <b>по этому описанию бот выбирает картинку</b>.
+        Например: «Кейс: магазин ёлок, 300 заявок за месяц — когда просят кейсы или результаты».</p>
 
       <div className={`upload-area ${uploading ? "disabled" : ""}`} onClick={() => !uploading && fileRef.current?.click()}>
         <div style={{ fontSize: 28, marginBottom: 6, opacity: 0.5 }}>{uploading ? "⏳" : "+"}</div>
@@ -104,7 +123,20 @@ export default function ImagesSection({ bot }: Props) {
               <a href={img.url} target="_blank" rel="noreferrer">
                 <img src={img.url} alt={img.name} />
               </a>
-              <div className="image-name" title={img.name}>{img.name}</div>
+              <textarea
+                className="input image-description"
+                rows={3}
+                maxLength={300}
+                value={drafts[img.id] ?? img.name}
+                onChange={(e) => {
+                  setDrafts({ ...drafts, [img.id]: e.target.value });
+                  setSavedId("");
+                }}
+                onBlur={() => saveName(img)}
+                placeholder="Что на картинке и когда отправлять"
+                title="Описание сохраняется, когда вы уходите из поля"
+              />
+              {savedId === img.id && <div className="text-success image-saved">✓ Сохранено</div>}
               {img.id && (
                 <button className="image-delete" onClick={() => remove(img)} title="Удалить">×</button>
               )}

@@ -6,7 +6,8 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, JSONResponse
+import httpx
 from app.config import FRONTEND_URL, BACKEND_URL
 from app.routes import webhooks, dialogs, settings, auth, admin, test_chat, questions
 from app.scheduler import run_scheduler_forever
@@ -62,6 +63,14 @@ async def lifespan(app):
 
 
 app = FastAPI(title="AI Sales Manager API", lifespan=lifespan)
+
+
+@app.exception_handler(httpx.HTTPError)
+async def database_connection_error(request, error):
+    """Оборвалась связь с базой (или другим сервисом) — понятная ошибка 503 вместо «Internal Server Error»."""
+    print(f"API ERROR: {request.url.path}: {type(error).__name__}: {error}")
+    return JSONResponse(status_code=503,
+                        content={"detail": "Связь с сервером прервалась (база данных или внешний сервис) — повторите через несколько секунд"})
 
 # Разрешаем запросы с фронтенда и бэкенда (SPA раздаётся бэкендом)
 allowed_origins = [

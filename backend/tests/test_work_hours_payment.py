@@ -420,3 +420,116 @@ def test_webhook_same_channel_only_once(monkeypatch):
                           "type": "text", "status": "inbound", "text": "Привет", "isEcho": False}]}
     TestClient(app).post("/webhook/wazzup/b1?token=s3cret", json=body)
     assert started == ["b1"]
+
+
+# ---------------- надёжность: сбои связи с базой ----------------
+
+def test_reply_retried_after_database_error(monkeypatch):
+    dialog = {"id": "d1", "bot_id": "b1", "status": "new", "city_id": "c1", "ai_disabled": False}
+    calls = make_env(monkeypatch, dialog, [ai(reply="Отправляю кейсы")])
+    real_get = pipeline.get_last_messages
+    failures = {"left": 1}
+
+    def flaky(dialog_id, limit=30):
+        if failures["left"]:
+            failures["left"] -= 1
+            raise RuntimeError("Server disconnected")
+        return real_get(dialog_id, limit)
+
+    monkeypatch.setattr(pipeline, "get_last_messages", flaky)
+    asyncio.run(pipeline.process_dialog_reply("b1", "d1"))
+    assert calls["send"] == ["Отправляю кейсы"]
+
+
+def test_forgotten_dialogs_answered_limited_times(monkeypatch):
+    monkeypatch.setattr(pipeline, "_forgotten_tries", {})
+    monkeypatch.setattr(pipeline, "find_recent_active_dialogs",
+                        lambda since, until=None: [{"id": "d1", "bot_id": "b1"}, {"id": "d2", "bot_id": "b1"}])
+    histories = {"d1": [{"id": "u1", "role": "user", "content": "Отправьте кейсы"}],
+                 "d2": [{"id": "u2", "role": "user", "content": "?"}, {"id": "a2", "role": "assistant", "content": "Ок"}]}
+    monkeypatch.setattr(pipeline, "get_last_messages", lambda dialog_id, limit=30: histories[dialog_id])
+    answered = []
+
+    async def fake_answer(dialogs):
+        answered.extend(d["id"] for d in dialogs)
+
+    monkeypatch.setattr(pipeline, "answer_waiting_dialogs", fake_answer)
+    monkeypatch.setattr(pipeline, "_forgotten_task", None)
+
+    async def run_once():
+        await pipeline.answer_forgotten_dialogs_once()
+        if pipeline._forgotten_task is not None:
+            await pipeline._forgotten_task
+
+    for _ in range(5):
+        asyncio.run(run_once())
+    assert answered == ["d1", "d1", "d1"]  # только клиент без ответа и не больше 3 попыток
+
+
+class FlakyMessages:
+    """Заглушка таблицы messages: первая вставка падает (обрыв связи), но запись при этом сохранилась."""
+
+    def __init__(self, saved_on_first_try):
+        self.saved_on_first_try = saved_on_first_try
+        self.rows = []
+        self.inserts = 0
+        self.mode = None
+        self.value = None
+
+    def table(self, name):
+        return self
+
+    def insert(self, row):
+        self.mode = "insert"
+        self.value = row
+        return self
+
+    def select(self, *args):
+        self.mode = "select"
+        return self
+
+    def eq(self, key, value):
+        self.value = value
+        return self
+
+    def limit(self, value):
+        return self
+
+    def execute(self):
+        if self.mode == "insert":
+            self.inserts += 1
+            if self.inserts == 1:
+                if self.saved_on_first_try:
+                    self.rows.append(dict(self.value, id="r1"))
+                raise RuntimeError("Server disconnected")
+            row = dict(self.value, id=f"r{self.inserts}")
+            self.rows.append(row)
+            return type("R", (), {"data": [row]})()
+        found = [r for r in self.rows if r.get("external_id") == self.value]
+        return type("R", (), {"data": found})()
+
+
+def test_insert_message_retried_without_duplicate(monkeypatch):
+    monkeypatch.setattr(pipeline, "SAVE_RETRY_PAUSE_SECONDS", 0)
+    # Связь оборвалась, но первая вставка успела сохраниться — второй записи не будет
+    fake = FlakyMessages(saved_on_first_try=True)
+    monkeypatch.setattr(pipeline, "supabase", fake)
+    saved = pipeline.insert_message_row({"role": "user", "content": "Привет", "external_id": "wz1"}, "wz1")
+    assert saved["id"] == "r1" and fake.inserts == 1 and len(fake.rows) == 1
+
+    # Первая вставка не сохранилась — повтор сохраняет
+    fake = FlakyMessages(saved_on_first_try=False)
+    monkeypatch.setattr(pipeline, "supabase", fake)
+    saved = pipeline.insert_message_row({"role": "user", "content": "Привет", "external_id": "wz2"}, "wz2")
+    assert saved["id"] == "r2" and len(fake.rows) == 1
+
+
+def test_sent_but_not_saved_reply_not_repeated(monkeypatch):
+    # Ответ ушёл клиенту, а в базу не записался — второй раз на то же сообщение не отвечаем
+    monkeypatch.setattr(pipeline, "_sent_not_saved", set())
+    dialog = {"id": "d1", "bot_id": "b1", "status": "new", "city_id": "c1", "ai_disabled": False}
+    calls = make_env(monkeypatch, dialog, [ai(reply="Ответ")])
+    monkeypatch.setattr(pipeline, "save_message", lambda *a, **k: None)
+    asyncio.run(pipeline.process_dialog_reply("b1", "d1"))
+    asyncio.run(pipeline.process_dialog_reply("b1", "d1"))
+    assert calls["send"] == ["Ответ"]

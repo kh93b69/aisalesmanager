@@ -18,7 +18,7 @@ from app.database import supabase
 from app.notifier import notify_reminder
 from app.followups import check_followups_once
 from app.daily_report import check_daily_reports_once
-from app.pipeline import answer_after_off_hours_once
+from app.pipeline import answer_after_off_hours_once, answer_forgotten_dialogs_once
 
 # Размер страницы при выборке диалогов (PostgREST отдаёт не больше 1000 строк)
 PAGE_SIZE = 500
@@ -194,6 +194,13 @@ async def run_scheduler_forever() -> None:
             raise
         except Exception as error:
             print(f"SCHEDULER ERROR: ответы после нерабочего времени: {error}")
+        # Страховка: клиенты, которым бот не ответил из-за сбоя (связь с базой, перезапуск)
+        try:
+            await answer_forgotten_dialogs_once()
+        except asyncio.CancelledError:
+            raise
+        except Exception as error:
+            print(f"SCHEDULER ERROR: проверка клиентов без ответа: {error}")
         # Сводка дня руководителю в Telegram
         try:
             await check_daily_reports_once()

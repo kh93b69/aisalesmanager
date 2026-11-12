@@ -309,6 +309,7 @@ def make_env(monkeypatch, dialog, ai_results, bot_extra=None, fresh_dialog=None,
 
     # Для handle_client_message
     monkeypatch.setattr(pipeline, "REPLY_DEBOUNCE_SECONDS", 0)
+    monkeypatch.setattr(pipeline, "REPLY_RETRY_PAUSE_SECONDS", 0)
     monkeypatch.setattr(pipeline, "external_id_exists", lambda external_id: False)
     monkeypatch.setattr(pipeline, "get_or_create_dialog",
                         lambda bot_arg, channel, chat_id: (dict(dialog_state), False))

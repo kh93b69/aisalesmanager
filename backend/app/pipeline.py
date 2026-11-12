@@ -10,6 +10,7 @@
 """
 import asyncio
 import re
+import time
 from datetime import datetime, timezone, timedelta
 from zoneinfo import ZoneInfo
 
@@ -44,6 +45,29 @@ KB_QUERY_USER_MESSAGES = 3
 
 # За какой период после перезапуска ищем диалоги без ответа (минут)
 RECOVERY_WINDOW_MINUTES = 30
+
+# Сколько раз пробуем сохранить сообщение при обрыве связи с базой и пауза между попытками (секунд)
+SAVE_ATTEMPTS = 3
+SAVE_RETRY_PAUSE_SECONDS = 0.5
+
+# Ответ клиенту ушёл, но не записался в базу (связь оборвалась): (dialog_id, id сообщения клиента).
+# По этим сообщениям больше не отвечаем — иначе клиент получил бы второй ответ
+_sent_not_saved = set()
+
+# Сколько раз пробуем ответить клиенту, если ответ упал с ошибкой, и пауза между попытками (секунд)
+REPLY_ATTEMPTS = 3
+REPLY_RETRY_PAUSE_SECONDS = 5
+
+# Страховка «никто не остался без ответа» (раз в минуту из планировщика):
+# сообщение клиента без ответа старше этого числа секунд — отвечаем
+# (больше, чем пауза перед ответом + ожидание расшифровки голосового)
+UNANSWERED_MIN_AGE_SECONDS = 150
+# Сколько раз страховка пробует ответить на одно сообщение клиента
+FORGOTTEN_MAX_TRIES = 3
+# (dialog_id, id сообщения клиента) → сколько раз страховка уже пробовала ответить
+_forgotten_tries = {}
+# Фоновая задача страховки (чтобы не запускать вторую параллельно)
+_forgotten_task = None
 
 # Словарь замков: dialog_id → asyncio.Lock (чтобы не отвечать в один диалог дважды одновременно)
 _dialog_locks = {}
@@ -450,22 +474,30 @@ def get_or_create_dialog(bot: dict, channel: str, chat_id: str) -> tuple[dict | 
     Функция синхронная (без await), поэтому внутри одного процесса два вызова
     не перемешаются и дубль диалога не создастся.
     """
-    try:
-        dialog = find_dialog(bot["id"], channel, chat_id)
-        if dialog:
-            return dialog, False
-        result = supabase.table("dialogs").insert({
-            "bot_id": bot["id"],
-            "chat_id": chat_id,
-            "channel": channel,
-            "status": "new",
-            "last_message_at": utc_now_iso(),
-        }).execute()
-        if result.data:
-            print(f"PIPELINE: новый диалог bot={bot['id']} channel={channel}")
-            return result.data[0], True
-    except Exception as error:
-        print(f"PIPELINE ERROR: get_or_create_dialog: {error}")
+    # При обрыве связи с базой пробуем ещё раз: повторный поиск не даст создать дубль диалога
+    for attempt in range(1, SAVE_ATTEMPTS + 1):
+        try:
+            dialog = find_dialog(bot["id"], channel, chat_id)
+            if dialog:
+                # Повтор нашёл диалог, который успела создать первая попытка, — он всё ещё новый
+                # (важно для проверки лимита подписки)
+                created_by_us = attempt > 1 and not dialog.get("last_message_preview")
+                return dialog, created_by_us
+            result = supabase.table("dialogs").insert({
+                "bot_id": bot["id"],
+                "chat_id": chat_id,
+                "channel": channel,
+                "status": "new",
+                "last_message_at": utc_now_iso(),
+            }).execute()
+            if result.data:
+                print(f"PIPELINE: новый диалог bot={bot['id']} channel={channel}")
+                return result.data[0], True
+            return None, False
+        except Exception as error:
+            print(f"PIPELINE ERROR: get_or_create_dialog (попытка {attempt}): {type(error).__name__}: {error}")
+            if attempt < SAVE_ATTEMPTS:
+                time.sleep(SAVE_RETRY_PAUSE_SECONDS)
     return None, False
 
 
@@ -510,20 +542,9 @@ def save_message(dialog_id: str, role: str, content: str, message_type="text", m
     if send_error:
         row["send_error"] = send_error
 
-    try:
-        result = supabase.table("messages").insert(row).execute()
-    except Exception as error:
-        text = str(error)
-        # 23505 — нарушение уникального индекса (одновременно пришёл тот же messageId)
-        if "23505" in text or "duplicate" in text.lower():
-            print(f"PIPELINE: дубль сообщения (уникальный индекс) external_id={external_id}")
-        else:
-            print(f"PIPELINE ERROR: не удалось сохранить сообщение: {error}")
+    saved = insert_message_row(row, external_id)
+    if not saved:
         return None
-
-    if not result.data:
-        return None
-    saved = result.data[0]
 
     now_iso = saved.get("created_at") or utc_now_iso()
     fields = {
@@ -534,6 +555,55 @@ def save_message(dialog_id: str, role: str, content: str, message_type="text", m
         fields["last_manager_message_at"] = now_iso
     update_dialog(dialog_id, fields)
     return saved
+
+
+def find_message_by_external_id(external_id: str) -> dict | None:
+    """Сообщение по внешнему ID (messageId из Wazzup) или None."""
+    result = supabase.table("messages").select("*").eq("external_id", external_id).limit(1).execute()
+    if result.data:
+        return result.data[0]
+    return None
+
+
+def insert_message_row(row: dict, external_id: str | None) -> dict | None:
+    """
+    Вставляет сообщение в БД. Если связь с базой оборвалась — пробуем ещё раз
+    (до SAVE_ATTEMPTS раз), иначе сообщение клиента потерялось бы без ответа.
+    Чтобы не создать дубль, перед повтором проверяем по external_id, не сохранилось ли оно уже.
+    None — дубль (такое сообщение уже обработано) или сохранить не удалось.
+    """
+    for attempt in range(1, SAVE_ATTEMPTS + 1):
+        try:
+            result = supabase.table("messages").insert(row).execute()
+            if result.data:
+                return result.data[0]
+            return None
+        except Exception as error:
+            text = str(error)
+            # 23505 — нарушение уникального индекса (тот же messageId уже сохранён)
+            if "23505" in text or "duplicate" in text.lower():
+                if attempt > 1 and external_id:
+                    # Первая попытка всё-таки сохранила сообщение — продолжаем с ним
+                    try:
+                        return find_message_by_external_id(external_id)
+                    except Exception as find_error:
+                        print(f"PIPELINE ERROR: поиск сохранённого сообщения: {find_error}")
+                        return None
+                print(f"PIPELINE: дубль сообщения (уникальный индекс) external_id={external_id}")
+                return None
+            print(f"PIPELINE ERROR: не удалось сохранить сообщение (попытка {attempt}): {type(error).__name__}: {error}")
+            if attempt == SAVE_ATTEMPTS:
+                return None
+        time.sleep(SAVE_RETRY_PAUSE_SECONDS)
+        if external_id:
+            try:
+                existing = find_message_by_external_id(external_id)
+            except Exception as error:
+                print(f"PIPELINE ERROR: проверка сохранённого сообщения: {error}")
+                existing = None
+            if existing:
+                return existing
+    return None
 
 
 def get_last_messages(dialog_id: str, limit: int = HISTORY_LIMIT) -> list[dict]:
@@ -562,7 +632,7 @@ def find_bot_images(bot_id: str) -> list[dict]:
         for item in result.data or []:
             content = item["content"]
             url = content.split("]")[0].replace("[IMAGE:", "")
-            name = content.split("] ")[-1] if "] " in content else "image"
+            name = content.split("] ", 1)[1] if "] " in content else "image"
             images.append({"url": url, "name": name})
         return images
     except Exception as error:
@@ -941,19 +1011,25 @@ async def process_dialog_reply(bot_id: str, dialog_id: str) -> None:
     """
     lock = _dialog_locks.setdefault(dialog_id, asyncio.Lock())
     async with lock:
-        try:
-            answered_id = None
-            for attempt in range(1 + MAX_EXTRA_PASSES):
-                answered_id = await _reply_once(bot_id, dialog_id, answered_id)
-                if not answered_id:
-                    break
-                messages = get_last_messages(dialog_id)
-                if not has_user_after(messages, answered_id):
-                    break
-                print(f"PIPELINE: клиент дописал во время ответа, диалог {dialog_id} — отвечаем ещё раз")
-        except Exception as error:
-            import traceback
-            print(f"PIPELINE ERROR: process_dialog_reply: {error}\n{traceback.format_exc()}")
+        # Сбой (например, оборвалась связь с базой) — пробуем ещё раз через паузу, чтобы клиент
+        # не остался без ответа. Повтор безопасен: _reply_once сам проверяет, есть ли на что отвечать.
+        for attempt in range(1, REPLY_ATTEMPTS + 1):
+            try:
+                answered_id = None
+                for extra_pass in range(1 + MAX_EXTRA_PASSES):
+                    answered_id = await _reply_once(bot_id, dialog_id, answered_id)
+                    if not answered_id:
+                        break
+                    messages = get_last_messages(dialog_id)
+                    if not has_user_after(messages, answered_id):
+                        break
+                    print(f"PIPELINE: клиент дописал во время ответа, диалог {dialog_id} — отвечаем ещё раз")
+                return
+            except Exception as error:
+                print(f"PIPELINE ERROR: ответ в диалог {dialog_id}, попытка {attempt} из {REPLY_ATTEMPTS}: "
+                      f"{type(error).__name__}: {error}")
+                if attempt < REPLY_ATTEMPTS:
+                    await asyncio.sleep(REPLY_RETRY_PAUSE_SECONDS * attempt)
 
 
 async def _reply_once(bot_id: str, dialog_id: str, answered_user_id=None):
@@ -994,6 +1070,8 @@ async def _reply_once(bot_id: str, dialog_id: str, answered_user_id=None):
             update_dialog(dialog_id, {"off_hours_since": None})
         return None
     last_user_id = last_user_message_id(messages)
+    if (dialog_id, last_user_id) in _sent_not_saved:
+        return None
 
     # Нерабочее время: ИИ не вызываем и клиенту не пишем (кроме одного автоответа, если он задан).
     # Ответим, когда начнётся рабочее время (планировщик → answer_after_off_hours_once)
@@ -1064,8 +1142,12 @@ async def _reply_once(bot_id: str, dialog_id: str, answered_user_id=None):
             attention_reason = f"Не удалось отправить ответ: {send_error}"
         elif payment_message:
             payment_sent = True
-        save_message(dialog_id, "assistant", reply, send_error=send_error,
-                     external_id=send_result.get("message_id") or None)
+        saved_reply = save_message(dialog_id, "assistant", reply, send_error=send_error,
+                                   external_id=send_result.get("message_id") or None)
+        if not saved_reply and send_result.get("ok"):
+            # Клиент ответ получил, а в базе его нет — запоминаем, чтобы не ответить второй раз
+            print(f"PIPELINE ERROR: ответ отправлен, но не сохранён, диалог {dialog_id}")
+            _sent_not_saved.add((dialog_id, last_user_id))
     else:
         attention_reason = "ИИ вернул пустой ответ"
 
@@ -1286,16 +1368,19 @@ def save_unanswered_question(bot_id: str, dialog_id: str, city_id: str | None,
         return False
 
 
-def find_recent_active_dialogs(since_iso: str) -> list[dict]:
-    """Диалоги с включённым ИИ и сообщениями после since_iso (постранично)."""
+def find_recent_active_dialogs(since_iso: str, until_iso: str | None = None) -> list[dict]:
+    """Диалоги с включённым ИИ и сообщениями после since_iso (и до until_iso, если задано), постранично."""
     dialogs = []
     start = 0
     page_size = 500
     while True:
-        result = supabase.table("dialogs") \
-            .select("id, bot_id") \
+        query = supabase.table("dialogs") \
+            .select("*") \
             .eq("ai_disabled", False) \
-            .gte("last_message_at", since_iso) \
+            .gte("last_message_at", since_iso)
+        if until_iso:
+            query = query.lte("last_message_at", until_iso)
+        result = query \
             .order("id") \
             .range(start, start + page_size - 1) \
             .execute()
@@ -1305,6 +1390,50 @@ def find_recent_active_dialogs(since_iso: str) -> list[dict]:
             break
         start += page_size
     return dialogs
+
+
+async def answer_forgotten_dialogs_once() -> None:
+    """
+    Страховка из планировщика (раз в минуту): клиент написал больше 90 секунд назад,
+    ИИ включён, а ответа нет (сбой связи, перезапуск сервера) — отвечаем.
+    Диалоги, которые прямо сейчас отвечаются (замок занят), пропускаем.
+    """
+    global _forgotten_task
+    if _forgotten_task is not None and not _forgotten_task.done():
+        return
+    # Счётчик попыток не растёт бесконечно: старые записи не нужны
+    if len(_forgotten_tries) > 5000:
+        _forgotten_tries.clear()
+    now = datetime.now(timezone.utc)
+    since = (now - timedelta(minutes=RECOVERY_WINDOW_MINUTES)).isoformat()
+    until = (now - timedelta(seconds=UNANSWERED_MIN_AGE_SECONDS)).isoformat()
+    forgotten = []
+    for dialog in find_recent_active_dialogs(since, until):
+        lock = _dialog_locks.get(dialog["id"])
+        if lock is not None and lock.locked():
+            continue
+        if dialog.get("off_hours_since"):
+            continue
+        # Голосовое ещё расшифровывается — ответ придёт обычным путём
+        if _pending_transcriptions.get((dialog.get("bot_id"), dialog.get("chat_id"))):
+            continue
+        last = get_last_messages(dialog["id"], limit=5)
+        if not has_unanswered_user(last):
+            continue
+        if (dialog["id"], last_user_message_id(last)) in _sent_not_saved:
+            continue
+        # Не больше FORGOTTEN_MAX_TRIES попыток на одно и то же сообщение клиента
+        # (если ответить не получается — не тратим ИИ каждую минуту)
+        key = (dialog["id"], last_user_message_id(last))
+        tries = _forgotten_tries.get(key, 0)
+        if tries >= FORGOTTEN_MAX_TRIES:
+            continue
+        _forgotten_tries[key] = tries + 1
+        forgotten.append(dialog)
+    if forgotten:
+        print(f"PIPELINE: клиенты без ответа — отвечаем: {len(forgotten)}")
+        # В фоне: генерация ответов не должна задерживать напоминания и дожимы планировщика
+        _forgotten_task = asyncio.create_task(answer_waiting_dialogs(forgotten))
 
 
 async def recover_unanswered_dialogs() -> None:

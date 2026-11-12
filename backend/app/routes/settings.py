@@ -1276,6 +1276,36 @@ def get_images(bot_id: str, user: dict = Depends(get_current_user)):
     return {"images": images}
 
 
+# Максимальная длина описания картинки
+MAX_IMAGE_DESCRIPTION = 300
+
+
+@router.put("/api/images/{chunk_id}")
+def update_image(chunk_id: str, data: dict, user: dict = Depends(get_current_user)):
+    """
+    Меняет описание картинки: что на ней и когда её отправлять.
+    По описанию бот решает, какую картинку отправить клиенту.
+    """
+    found = supabase.table("knowledge_chunks").select("id, bot_id, content").eq("id", chunk_id).limit(1).execute()
+    if not found.data or not str(found.data[0].get("content", "")).startswith(IMAGE_PREFIX):
+        raise HTTPException(status_code=404, detail="Картинка не найдена")
+    chunk = found.data[0]
+    require_bot_access(chunk["bot_id"], user["id"], owner_only=True)
+
+    name = data.get("name") if isinstance(data, dict) else None
+    if not isinstance(name, str) or not name.strip():
+        raise HTTPException(status_code=400, detail="Напишите, что на картинке")
+    # Описание — одной строкой (перенос строки сломал бы формат «[IMAGE:url] описание»)
+    name = " ".join(name.split())
+    if len(name) > MAX_IMAGE_DESCRIPTION:
+        raise HTTPException(status_code=400, detail=f"Описание не длиннее {MAX_IMAGE_DESCRIPTION} символов")
+
+    url = parse_image_content(chunk["content"])["url"]
+    supabase.table("knowledge_chunks").update({"content": f"{IMAGE_PREFIX}{url}] {name}"}) \
+        .eq("id", chunk["id"]).execute()
+    return {"id": chunk["id"], "url": url, "name": name}
+
+
 @router.delete("/api/images/{chunk_id}")
 def delete_image(chunk_id: str, user: dict = Depends(get_current_user)):
     """Удаляет картинку бота (запись и, по возможности, файл в Storage)."""

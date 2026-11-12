@@ -78,6 +78,8 @@ export default function DialogList({ botId, cities, lockedCityId, selectedId, on
 
     // Предыдущий запрос ещё идёт — новый не отправляем (иначе запросы копятся на сервере)
     let inFlight = false;
+    // Сколько автообновлений подряд не удалось: одиночный сбой связи не показываем
+    let failures = 0;
     const load = (force: boolean) => {
       if (inFlight) return;
       // Вкладка свёрнута — не опрашиваем сервер зря
@@ -89,9 +91,11 @@ export default function DialogList({ botId, cities, lockedCityId, selectedId, on
           setDialogs(data.dialogs || []);
           setCounts(data.counts || {});
           setError("");
+          failures = 0;
         })
         .catch((err) => {
-          if (!cancelled) setError(errorText(err));
+          failures += 1;
+          if (!cancelled && (force || failures >= 3)) setError(errorText(err));
         })
         .finally(() => {
           inFlight = false;

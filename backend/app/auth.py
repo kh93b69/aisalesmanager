@@ -1,7 +1,9 @@
 from fastapi import HTTPException, Depends
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from supabase import create_client, ClientOptions
+from gotrue.errors import AuthRetryableError
 from app.config import SUPABASE_URL, SUPABASE_ANON_KEY
+from app.database import make_retry_http_client
 
 # Схема авторизации — Bearer token
 security = HTTPBearer()
@@ -15,6 +17,8 @@ auth_client = create_client(
     SUPABASE_ANON_KEY,
     options=ClientOptions(auto_refresh_token=False, persist_session=False),
 )
+# Проверка входа — тоже через HTTP/1.1 с повтором при обрыве (см. app/database.py)
+auth_client.auth._http_client = make_retry_http_client()
 
 
 def get_current_user(credentials: HTTPAuthorizationCredentials = Depends(security)) -> dict:
@@ -38,6 +42,9 @@ def get_current_user(credentials: HTTPAuthorizationCredentials = Depends(securit
 
     except HTTPException:
         raise
+    except AuthRetryableError:
+        # Связь с Supabase оборвалась — токен, скорее всего, в порядке (не выкидываем из панели)
+        raise HTTPException(status_code=503, detail="Связь с сервером авторизации прервалась — повторите через несколько секунд")
     except Exception:
         raise HTTPException(status_code=401, detail="Недействительный токен")
 

@@ -13,8 +13,13 @@
 """
 
 import uuid
+
+import httpx
 from fastapi import HTTPException
 from app.database import supabase
+
+# Текст ошибки, когда связь с базой временно оборвалась
+DB_UNAVAILABLE_TEXT = "Связь с базой данных прервалась — повторите через несколько секунд"
 
 # Поля бота, которые НИКОГДА не отдаём на фронтенд
 SECRET_BOT_FIELDS = ["wazzup_api_key", "wazzup_webhook_secret"]
@@ -91,10 +96,16 @@ def get_bot_access(bot_id: str, user_id: str) -> dict | None:
 
     try:
         bot_result = supabase.table("bots").select("*").eq("id", bot_id).limit(1).execute()
+    except httpx.HTTPError as e:
+        # Связь с базой оборвалась — это не «нет доступа», а временный сбой
+        print(f"ACCESS ERROR: база недоступна: {e}")
+        raise HTTPException(status_code=503, detail=DB_UNAVAILABLE_TEXT)
     except Exception as e:
-        # Например, bot_id — не uuid. Считаем, что бота нет.
+        # Неверный uuid в адресе (код 22P02) — бота нет. Любая другая ошибка — временный сбой базы.
+        if "22P02" in str(e):
+            return None
         print(f"ACCESS ERROR: не удалось загрузить бота: {e}")
-        return None
+        raise HTTPException(status_code=503, detail=DB_UNAVAILABLE_TEXT)
 
     if not bot_result.data:
         return None
@@ -111,9 +122,12 @@ def get_bot_access(bot_id: str, user_id: str) -> dict | None:
             .eq("user_id", user_id) \
             .limit(1) \
             .execute()
+    except httpx.HTTPError as e:
+        print(f"ACCESS ERROR: база недоступна: {e}")
+        raise HTTPException(status_code=503, detail=DB_UNAVAILABLE_TEXT)
     except Exception as e:
         print(f"ACCESS ERROR: не удалось загрузить команду: {e}")
-        return None
+        raise HTTPException(status_code=503, detail=DB_UNAVAILABLE_TEXT)
 
     member = member_result.data[0] if member_result.data else None
     return decide_access(bot, member, user_id)
