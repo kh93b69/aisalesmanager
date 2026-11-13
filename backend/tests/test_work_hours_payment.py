@@ -182,8 +182,10 @@ def test_answer_after_off_hours_once(monkeypatch):
 
 
 def test_followups_respect_schedule():
-    now = datetime(2026, 11, 12, 4, 0, tzinfo=timezone.utc)  # 09:00 в Алматы
+    now = datetime(2026, 11, 12, 5, 0, tzinfo=timezone.utc)  # 10:00 в Алматы
     assert followups.can_send_followup({}, now) is True
+    early = datetime(2026, 11, 12, 4, 30, tzinfo=timezone.utc)  # 09:30 — без графика ещё рано
+    assert followups.can_send_followup({}, early) is False
     assert followups.can_send_followup(CLOSED_BOT, now) is False
     night_bot = {"work_hours_enabled": True, "work_schedule": week("22:00", "06:00")}
     night = datetime(2026, 11, 12, 18, 0, tzinfo=timezone.utc)  # 23:00 в Алматы
@@ -533,3 +535,55 @@ def test_sent_but_not_saved_reply_not_repeated(monkeypatch):
     asyncio.run(pipeline.process_dialog_reply("b1", "d1"))
     asyncio.run(pipeline.process_dialog_reply("b1", "d1"))
     assert calls["send"] == ["Ответ"]
+
+
+
+# ---------------- дожимы: никакой рассылки по старой базе ----------------
+
+def test_followup_late_step_skipped():
+    now = datetime(2026, 11, 13, 6, 0, tzinfo=timezone.utc)
+    step = {"hours": 3, "text": ""}
+    assert followups.is_followup_due({"last_message_at": (now - timedelta(hours=4)).isoformat()}, step, now) is True
+    # Ответ бота был 5 дней назад — дожим «через 3 часа» уже неуместен
+    assert followups.is_followup_due({"last_message_at": (now - timedelta(days=5)).isoformat()}, step, now) is False
+
+
+def test_followups_need_start_time(monkeypatch):
+    now = datetime(2026, 11, 13, 6, 0, tzinfo=timezone.utc)  # 11:00 в Алматы
+    queried = []
+    monkeypatch.setattr(followups, "fetch_bots_with_followups", lambda: [
+        {"id": "old", "followups_enabled": True, "followups": [{"hours": 3, "text": "x"}]},
+        {"id": "new", "followups_enabled": True, "followups_enabled_at": (now - timedelta(hours=2)).isoformat(),
+         "followups": [{"hours": 3, "text": "x"}, {"hours": 24, "text": "y"}]},
+    ])
+
+    def fake_fetch(bot_id, max_steps, min_hours, max_hours, since, now_arg):
+        queried.append((bot_id, since))
+        return []
+
+    monkeypatch.setattr(followups, "fetch_candidate_dialogs", fake_fetch)
+    asyncio.run(followups.check_followups_once(now))
+    # Бот без момента включения не дожимает никого; у второго — только диалоги после включения
+    assert [q[0] for q in queried] == ["new"]
+    assert queried[0][1] == now - timedelta(hours=2)
+
+
+def test_followups_limited_per_pass(monkeypatch):
+    now = datetime(2026, 11, 13, 6, 0, tzinfo=timezone.utc)
+    bot = {"id": "b1", "followups_enabled": True, "followups_enabled_at": (now - timedelta(days=1)).isoformat(),
+           "followups": [{"hours": 3, "text": "Актуально?"}]}
+    monkeypatch.setattr(followups, "fetch_bots_with_followups", lambda: [bot])
+    dialogs = []
+    for number in range(10):
+        dialogs.append({"id": f"d{number}", "followup_count": 0,
+                        "last_message_at": (now - timedelta(hours=4)).isoformat()})
+    monkeypatch.setattr(followups, "fetch_candidate_dialogs", lambda *a: dialogs)
+    sent = []
+
+    async def fake_send(bot_arg, dialog, step):
+        sent.append(dialog["id"])
+        return True
+
+    monkeypatch.setattr(followups, "send_followup", fake_send)
+    asyncio.run(followups.check_followups_once(now))
+    assert len(sent) == followups.MAX_SENDS_PER_PASS

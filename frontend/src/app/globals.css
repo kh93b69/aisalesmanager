@@ -1827,3 +1827,6 @@ code {
 
 /* Ссылки в сообщениях — видны и на фиолетовом пузыре бота */
 .message-text a { color: inherit; text-decoration: underline; word-break: break-all; }
+
+/* Список правил под заголовком раздела настроек */
+.hint-list { margin: 0 0 12px 18px; padding: 0; font-size: 13px; color: var(--text-muted); line-height: 1.6; }

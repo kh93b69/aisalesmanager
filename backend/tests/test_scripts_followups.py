@@ -158,6 +158,9 @@ def make_followup_env(monkeypatch, messages, ai_result=None, claim=True):
     monkeypatch.setattr(pipeline, "get_dialog", lambda dialog_id: dict(dialog))
     monkeypatch.setattr(pipeline, "get_bot_cities", lambda bot_id: [])
     monkeypatch.setattr(followups, "claim_followup", lambda d: claim)
+    # Тест не должен зависеть от того, который сейчас час, и от базы
+    monkeypatch.setattr(followups, "can_send_followup", lambda bot, now: True)
+    monkeypatch.setattr(followups, "has_open_question", lambda dialog_id: False)
     generated = []
 
     async def fake_generate(bot, dialog_arg, cities, city, history, query, is_first_reply=False):
@@ -351,3 +354,19 @@ def test_answer_question_only_owner(monkeypatch):
     response = client.post(f"/api/questions/{store.questions[0]['id']}/answer", json={"answer": "Да"})
     assert response.status_code == 403
     assert store.chunks == []
+
+
+def test_followup_skipped_when_client_waits_for_answer(monkeypatch):
+    messages = [{"role": "user", "content": "Есть рассрочка?"}, {"role": "assistant", "content": "Уточню у руководителя"}]
+    dialog, sent, saved, generated = make_followup_env(monkeypatch, messages)
+    monkeypatch.setattr(followups, "has_open_question", lambda dialog_id: True)
+    asyncio.run(followups.send_followup({"id": "b1"}, dialog, {"hours": 3, "text": "Напоминаю"}))
+    assert sent == []
+
+
+def test_followup_ai_can_decline(monkeypatch):
+    # Разговор завершён — ИИ вернул пустой ответ (parse_response делает из него ok=False) → ничего не уходит
+    messages = [{"role": "user", "content": "Спасибо, до свидания"}, {"role": "assistant", "content": "Всего доброго!"}]
+    dialog, sent, saved, generated = make_followup_env(monkeypatch, messages, ai_result={"reply": "", "ok": False})
+    asyncio.run(followups.send_followup({"id": "b1"}, dialog, {"hours": 3, "text": ""}))
+    assert sent == []

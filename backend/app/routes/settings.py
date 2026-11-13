@@ -739,6 +739,12 @@ def update_bot(bot_id: str, data: dict, user: dict = Depends(get_current_user)):
     if not fields:
         return {"bot": public_bot(access["bot"])}
     check_final_bot_state(access["bot"], fields)
+    # Дожимы включили (были выключены) — запоминаем момент: дожим получат только клиенты,
+    # которым бот напишет после этого (старым диалогам не пишем). Поле есть после миграции 005.
+    old_bot = access["bot"]
+    if fields.get("followups_enabled") and "followups_enabled_at" in old_bot:
+        if not old_bot.get("followups_enabled") or not old_bot.get("followups_enabled_at"):
+            fields["followups_enabled_at"] = pipeline.utc_now_iso()
     bot = update_bot_row(bot_id, fields)
     return {"bot": public_bot(bot)}
 

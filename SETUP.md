@@ -31,7 +31,8 @@
 2. Вставьте целиком файл `backend/migrations/001_wazzup_cities_statuses.sql` → **Run**.
    Затем так же `backend/migrations/002_storage_bot_images.sql` (хранилище картинок)
    , `backend/migrations/003_scripts_followups_questions.sql` (скрипты, дожимы, вопросы без ответа)
-   и `backend/migrations/004_work_hours_payment_report.sql` (график работы, оплата, сводка дня).
+   , `backend/migrations/004_work_hours_payment_report.sql` (график работы, оплата, сводка дня)
+   и `backend/migrations/005_followups_enabled_at.sql` (дожимы — только новым разговорам; без неё дожимы не отправляются).
    Миграцию можно запускать повторно — она ничего не ломает и не удаляет.
 3. В админ-панели сервиса (`/admin`) поднимите клиенту лимит диалогов
    (`max_dialogs_per_month`) — минимум **3500** для 1500–3000 заявок. Иначе бот замолчит после 100 диалогов.
