@@ -108,6 +108,15 @@ async def answer_question(question_id: str, data: dict, user: dict = Depends(get
 
     bot = access["bot"]
 
+    # 0. Сразу «забираем» вопрос (open → answered условно): повторный или двойной клик
+    # не отправит клиенту ответ второй раз
+    claimed = supabase.table("unanswered_questions") \
+        .update({"status": "answered", "answer": answer, "answered_at": pipeline.utc_now_iso()}) \
+        .eq("id", question["id"]).eq("status", question.get("status") or "open").execute()
+    if not claimed.data:
+        raise HTTPException(status_code=400, detail="На этот вопрос уже ответили")
+    previous_status = question.get("status") or "open"
+
     # 1. Клиенту (по желанию) — от имени сотрудника. ИИ на паузу не ставим: бот продолжит диалог.
     sent_to_client = False
     if data.get("send_to_client") and question.get("dialog_id"):
@@ -115,6 +124,9 @@ async def answer_question(question_id: str, data: dict, user: dict = Depends(get
         if dialog:
             result = await messenger.send_to_client(bot, dialog, answer, from_bot=False)
             if not result.get("ok"):
+                # Не отправилось — возвращаем вопрос в прежний статус, можно попробовать ещё раз
+                supabase.table("unanswered_questions").update({"status": previous_status}) \
+                    .eq("id", question["id"]).execute()
                 raise HTTPException(status_code=502,
                                     detail=f"Ответ не отправлен клиенту: {result.get('error') or 'ошибка'}. В базу знаний не сохранён — попробуйте ещё раз")
             pipeline.save_message(dialog["id"], "manager", answer,

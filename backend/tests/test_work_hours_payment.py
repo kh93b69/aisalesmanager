@@ -190,7 +190,8 @@ def test_followups_respect_schedule():
     night_bot = {"work_hours_enabled": True, "work_schedule": week("22:00", "06:00")}
     night = datetime(2026, 11, 12, 18, 0, tzinfo=timezone.utc)  # 23:00 в Алматы
     assert followups.can_send_followup({}, night) is False
-    assert followups.can_send_followup(night_bot, night) is True
+    # Даже ночной график не даёт писать дожимы ночью
+    assert followups.can_send_followup(night_bot, night) is False
 
 
 # ---------------- оплата ----------------
@@ -580,10 +581,58 @@ def test_followups_limited_per_pass(monkeypatch):
     monkeypatch.setattr(followups, "fetch_candidate_dialogs", lambda *a: dialogs)
     sent = []
 
-    async def fake_send(bot_arg, dialog, step):
+    async def fake_send(bot_arg, dialog, step, total_steps=3):
         sent.append(dialog["id"])
         return True
 
     monkeypatch.setattr(followups, "send_followup", fake_send)
     asyncio.run(followups.check_followups_once(now))
     assert len(sent) == followups.MAX_SENDS_PER_PASS
+
+
+
+# ---------------- старые и опоздавшие сообщения клиентов ----------------
+
+def test_old_client_message_not_answered(monkeypatch):
+    dialog = {"id": "d1", "bot_id": "b1", "status": "in_progress", "city_id": "c1", "ai_disabled": False,
+              "off_hours_since": "2026-11-01T18:00:00+00:00"}
+    old_time = (datetime.now(timezone.utc) - timedelta(days=5)).isoformat()
+    messages = [{"id": "m1", "role": "user", "content": "Сколько стоит?", "created_at": old_time}]
+    calls = make_env(monkeypatch, dialog, [ai(reply="Ответ")], messages=messages)
+    asyncio.run(pipeline.process_dialog_reply("b1", "d1"))
+    assert calls["send"] == [] and calls["generate"] == []
+    fields = merged(calls["updates"])
+    assert fields["needs_attention"] is True and fields["off_hours_since"] is None
+
+
+def test_late_incoming_message_saved_but_not_answered(monkeypatch):
+    dialog = {"id": "d1", "bot_id": "b1", "status": "in_progress", "city_id": "c1", "ai_disabled": False}
+    calls = make_env(monkeypatch, dialog, [ai(reply="Ответ")], messages=[])
+    late = int((datetime.now(timezone.utc) - timedelta(hours=30)).timestamp())
+    asyncio.run(pipeline.handle_client_message({"id": "b1"}, "telegram", "777", "Привет", external_id="tg:1", sent_at=late))
+    assert calls["saved"][0][1] == "Привет"
+    assert calls["send"] == [] and calls["generate"] == []
+    assert merged(calls["updates"])["needs_attention"] is True
+
+
+def test_parse_sent_at():
+    assert pipeline.parse_sent_at("2026-11-13T09:00:00.000Z") == datetime(2026, 11, 13, 9, 0, tzinfo=timezone.utc)
+    assert pipeline.parse_sent_at(0) == datetime(1970, 1, 1, tzinfo=timezone.utc)
+    assert pipeline.parse_sent_at("мусор") is None and pipeline.parse_sent_at(None) is None
+
+
+def test_followup_declined_ends_chain(monkeypatch):
+    messages = [{"role": "user", "content": "Спасибо, всё"}, {"role": "assistant", "content": "Всего доброго!"}]
+    monkeypatch.setattr(pipeline, "get_last_messages", lambda dialog_id, limit=30: list(messages))
+    monkeypatch.setattr(pipeline, "get_bot_cities", lambda bot_id: [])
+    monkeypatch.setattr(followups, "claim_followup", lambda d: True)
+    monkeypatch.setattr(followups, "has_open_question", lambda dialog_id: False)
+
+    async def decline(*args, **kwargs):
+        return {"reply": "", "ok": False}
+
+    monkeypatch.setattr(pipeline, "build_and_generate", decline)
+    finished = []
+    monkeypatch.setattr(followups, "finish_followups", lambda dialog, total: finished.append(total))
+    asyncio.run(followups.send_followup({"id": "b1"}, {"id": "d1", "followup_count": 0}, {"hours": 3, "text": ""}, 2))
+    assert finished == [2]

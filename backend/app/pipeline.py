@@ -46,6 +46,13 @@ KB_QUERY_USER_MESSAGES = 3
 # За какой период после перезапуска ищем диалоги без ответа (минут)
 RECOVERY_WINDOW_MINUTES = 30
 
+# Сообщение клиента пришло к нам с опозданием больше этого (телефон канала был офлайн, повторная
+# доставка вебхука) — сохраняем, но ИИ не отвечает: менеджер посмотрит сам
+STALE_INCOMING_HOURS = 12
+# Сообщению клиента больше этого — бот не отвечает сам ни при каком пути (утро после нерабочего
+# времени, включение ИИ, перезапуск, страховка): диалог помечается «нужно внимание»
+MAX_REPLY_AGE_HOURS = 72
+
 # Сколько раз пробуем сохранить сообщение при обрыве связи с базой и пауза между попытками (секунд)
 SAVE_ATTEMPTS = 3
 SAVE_RETRY_PAUSE_SECONDS = 0.5
@@ -192,6 +199,33 @@ def last_user_text(messages: list[dict]) -> str:
             parts.append(content)
     parts.reverse()
     return "\n".join(parts)
+
+
+def parse_sent_at(value) -> datetime | None:
+    """
+    Время отправки сообщения клиентом: ISO-строка (Wazzup dateTime) или секунды Unix (Telegram date).
+    None — нет или не разобралось (тогда считаем сообщение свежим).
+    """
+    if value is None or isinstance(value, bool):
+        return None
+    try:
+        if isinstance(value, (int, float)):
+            return datetime.fromtimestamp(value, tz=timezone.utc)
+        return parse_time(value)
+    except (ValueError, TypeError, OverflowError, OSError):
+        return None
+
+
+def message_age_hours(message: dict | None, now: datetime | None = None) -> float:
+    """Сколько часов назад сохранено сообщение (0, если время неизвестно)."""
+    if not message or not message.get("created_at"):
+        return 0
+    if now is None:
+        now = datetime.now(timezone.utc)
+    try:
+        return (now - parse_time(message["created_at"])).total_seconds() / 3600
+    except (ValueError, TypeError):
+        return 0
 
 
 def describe_message(message_type: str, text: str, transcript: str | None = None) -> str:
@@ -748,8 +782,12 @@ async def apply_subscription_limit(bot: dict, dialog: dict) -> bool:
 
 async def handle_client_message(bot: dict, channel: str, chat_id: str, text: str,
                                 message_type: str = "text", media_url: str | None = None,
-                                external_id: str | None = None, contact_name: str | None = None) -> None:
-    """Входящее сообщение от клиента: сохранить, подождать паузу, ответить ИИ."""
+                                external_id: str | None = None, contact_name: str | None = None,
+                                sent_at=None) -> None:
+    """
+    Входящее сообщение от клиента: сохранить, подождать паузу, ответить ИИ.
+    sent_at — когда клиент отправил сообщение (из вебхука): сильно опоздавшим ИИ не отвечает.
+    """
     try:
         # Быстрая проверка дубля до расшифровки голосового (экономим запросы)
         if external_id_exists(external_id):
@@ -800,6 +838,19 @@ async def handle_client_message(bot: dict, channel: str, chat_id: str, text: str
         # Клиент ответил — дожимы начинаются заново (если он снова замолчит)
         if dialog.get("followup_count"):
             update_dialog(dialog["id"], {"followup_count": 0})
+
+        # 4. Сообщение пришло с большим опозданием — ИИ не отвечает (иначе после восстановления
+        # канала бот ответил бы пачке старых сообщений), менеджер посмотрит сам
+        sent_time = parse_sent_at(sent_at)
+        if sent_time is not None:
+            late_hours = (datetime.now(timezone.utc) - sent_time).total_seconds() / 3600
+            if late_hours > STALE_INCOMING_HOURS:
+                print(f"PIPELINE: сообщение пришло с опозданием {late_hours:.0f} ч, диалог {dialog['id']} — ИИ не отвечает")
+                update_dialog(dialog["id"], {
+                    "needs_attention": True,
+                    "attention_reason": f"Сообщение клиента пришло с опозданием ({late_hours:.0f} ч) — ответьте вручную",
+                })
+                return
 
         # 5. ИИ на паузе — сообщение сохранено, сотрудники увидят его в панели
         if dialog.get("ai_disabled"):
@@ -1073,6 +1124,20 @@ async def _reply_once(bot_id: str, dialog_id: str, answered_user_id=None):
     if (dialog_id, last_user_id) in _sent_not_saved:
         return None
 
+    # Клиент писал давно (больше MAX_REPLY_AGE_HOURS) — бот сам не отвечает: такой ответ выглядел бы
+    # как спам. Передаём диалог менеджеру.
+    last_user = None
+    for message in messages:
+        if message.get("id") == last_user_id:
+            last_user = message
+    if message_age_hours(last_user) > MAX_REPLY_AGE_HOURS:
+        print(f"PIPELINE: сообщение клиента старше {MAX_REPLY_AGE_HOURS} ч, диалог {dialog_id} — ИИ не отвечает")
+        fields = {"needs_attention": True, "attention_reason": "Клиент писал давно и остался без ответа — ответьте вручную"}
+        if dialog.get("off_hours_since"):
+            fields["off_hours_since"] = None
+        update_dialog(dialog_id, fields)
+        return None
+
     # Нерабочее время: ИИ не вызываем и клиенту не пишем (кроме одного автоответа, если он задан).
     # Ответим, когда начнётся рабочее время (планировщик → answer_after_off_hours_once)
     if not working:
@@ -1252,6 +1317,20 @@ def last_user_message_id(messages: list[dict]):
     return None
 
 
+def mark_off_hours(dialog_id: str) -> bool:
+    """
+    Отмечает «клиент ждёт рабочего времени» — условно, только если отметки ещё нет.
+    True — отметка поставлена сейчас (значит, автоответ в этот нерабочий период ещё не уходил).
+    """
+    try:
+        marked = supabase.table("dialogs").update({"off_hours_since": utc_now_iso()}) \
+            .eq("id", dialog_id).is_("off_hours_since", "null").execute()
+        return bool(marked.data)
+    except Exception as error:
+        print(f"PIPELINE ERROR: не удалось отметить ожидание рабочего времени: {error}")
+        return False
+
+
 async def hold_until_work_time(bot: dict, dialog: dict) -> None:
     """
     Нерабочее время: отмечаем, что клиент ждёт ответа (бот ответит, когда начнётся рабочее время),
@@ -1260,7 +1339,10 @@ async def hold_until_work_time(bot: dict, dialog: dict) -> None:
     if dialog.get("off_hours_since"):
         # Уже отмечен — автоответ в этот нерабочий период уже был
         return
-    update_dialog(dialog["id"], {"off_hours_since": utc_now_iso()})
+    # Ставим отметку условно (только если её ещё нет) и проверяем, что она записалась:
+    # иначе при сбое базы автоответ мог бы уйти повторно
+    if not mark_off_hours(dialog["id"]):
+        return
     dialog["off_hours_since"] = utc_now_iso()
     print(f"PIPELINE: нерабочее время, диалог {dialog['id']} — ответим, когда начнётся рабочее время")
 

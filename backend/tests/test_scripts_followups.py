@@ -161,6 +161,7 @@ def make_followup_env(monkeypatch, messages, ai_result=None, claim=True):
     # Тест не должен зависеть от того, который сейчас час, и от базы
     monkeypatch.setattr(followups, "can_send_followup", lambda bot, now: True)
     monkeypatch.setattr(followups, "has_open_question", lambda dialog_id: False)
+    monkeypatch.setattr(followups, "finish_followups", lambda dialog, total: None)
     generated = []
 
     async def fake_generate(bot, dialog_arg, cities, city, history, query, is_first_reply=False):

@@ -12,7 +12,7 @@
 - бот написал клиенту ПОСЛЕ включения дожимов (старым диалогам не пишем);
 - прошло нужное число часов (но не намного больше — опоздавшие дожимы не шлём);
 - клиент не ждёт от нас ответа на свой вопрос (нет открытого «вопроса без ответа»);
-- сейчас рабочее время бота (если график не включён — 10:00–20:00 по TIMEZONE).
+- сейчас 10:00–20:00 по TIMEZONE и (если включён график) рабочее время бота.
 За проход (раз в минуту) — не больше MAX_SENDS_PER_PASS дожимов на бота.
 Когда клиент отвечает, счётчик дожимов сбрасывается (см. pipeline.handle_client_message).
 """
@@ -72,10 +72,15 @@ def is_work_time(now: datetime) -> bool:
 
 
 def can_send_followup(bot: dict, now: datetime) -> bool:
-    """Можно ли сейчас писать дожимы: по графику бота, а без графика — днём (10:00–20:00)."""
+    """
+    Можно ли сейчас писать дожимы: всегда только днём (10:00–20:00), а если включён график —
+    ещё и в рабочее время бота. Ночной или круглосуточный график не даёт писать дожимы ночью.
+    """
+    if not is_work_time(now):
+        return False
     if bot.get("work_hours_enabled"):
         return is_bot_working(bot, now)
-    return is_work_time(now)
+    return True
 
 
 def is_followup_due(dialog: dict, step: dict, now: datetime) -> bool:
@@ -198,7 +203,15 @@ async def build_followup_text(bot: dict, dialog: dict, messages: list[dict], ste
     return pipeline.strip_staff_prefix(result.get("reply") or "")
 
 
-async def send_followup(bot: dict, dialog: dict, step: dict) -> bool:
+def finish_followups(dialog: dict, total_steps: int) -> None:
+    """Цепочка дожимов этому клиенту закончена (ИИ решил, что напоминать неуместно)."""
+    try:
+        supabase.table("dialogs").update({"followup_count": total_steps}).eq("id", dialog["id"]).execute()
+    except Exception as error:
+        print(f"FOLLOWUP ERROR: не удалось завершить цепочку дожимов: {error}")
+
+
+async def send_followup(bot: dict, dialog: dict, step: dict, total_steps: int = MAX_FOLLOWUP_STEPS) -> bool:
     """
     Отправляет один дожим (под замком диалога, чтобы не столкнуться с обычным ответом).
     True — дожим отправлен.
@@ -219,7 +232,9 @@ async def send_followup(bot: dict, dialog: dict, step: dict) -> bool:
 
         text = await build_followup_text(bot, dialog, messages, step)
         if not text:
-            print(f"FOLLOWUP: дожим не нужен или не сформирован, диалог {dialog['id']}")
+            # ИИ решил, что напоминание неуместно (разговор завершён) — следующие шаги тоже не шлём
+            print(f"FOLLOWUP: дожим не нужен или не сформирован, диалог {dialog['id']} — цепочка завершена")
+            finish_followups(dialog, total_steps)
             return False
 
         # Пока ИИ писал текст, могло закончиться рабочее время — не пишем клиенту
@@ -268,9 +283,10 @@ async def check_followups_once(now: datetime | None = None) -> None:
         except Exception as error:
             print(f"FOLLOWUP ERROR: бот {bot.get('id')}: {error}")
             continue
-        sent_count = 0
+        # Не больше MAX_SENDS_PER_PASS попыток за проход (включая отказы ИИ) — понемногу, а не пачкой
+        attempts = 0
         for dialog in dialogs:
-            if sent_count >= MAX_SENDS_PER_PASS:
+            if attempts >= MAX_SENDS_PER_PASS:
                 break
             try:
                 index = dialog.get("followup_count") or 0
@@ -279,7 +295,7 @@ async def check_followups_once(now: datetime | None = None) -> None:
                 step = steps[index]
                 if not is_followup_due(dialog, step, now):
                     continue
-                if await send_followup(bot, dialog, step):
-                    sent_count += 1
+                attempts += 1
+                await send_followup(bot, dialog, step, len(steps))
             except Exception as error:
                 print(f"FOLLOWUP ERROR: диалог {dialog.get('id')}: {error}")

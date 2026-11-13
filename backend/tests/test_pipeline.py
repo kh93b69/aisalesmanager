@@ -291,6 +291,15 @@ def make_env(monkeypatch, dialog, ai_results, bot_extra=None, fresh_dialog=None,
         dialog_state.update(fields)
 
     monkeypatch.setattr(pipeline, "update_dialog", fake_update)
+
+    def fake_mark_off_hours(dialog_id):
+        # Как условное обновление в БД: только если отметки ещё нет
+        if dialog_state.get("off_hours_since"):
+            return False
+        fake_update(dialog_id, {"off_hours_since": "2026-11-12T18:00:00+00:00"})
+        return True
+
+    monkeypatch.setattr(pipeline, "mark_off_hours", fake_mark_off_hours)
     monkeypatch.setattr(pipeline, "get_team", lambda bot_id: [
         {"id": "tm1", "user_id": "u1", "city_id": None, "last_assigned_at": None},
     ])

@@ -162,6 +162,8 @@ def parse_wazzup_body(body: dict, bot: dict) -> list[dict]:
             "message_type": normalize_message_type(message.get("type") or ""),
             "media_url": message.get("contentUri") or None,
             "external_id": message.get("messageId") or None,
+            # Когда клиент отправил сообщение (ISO) — сильно опоздавшим ИИ не отвечает
+            "sent_at": message.get("dateTime") or None,
         }
         if message.get("isEcho"):
             # Исходящее не через наш API — написал сотрудник
@@ -244,6 +246,7 @@ def dispatch_wazzup_events(bot: dict, events: list[dict]) -> None:
                 handle_client_message, bot, "whatsapp", event["chat_id"], event["text"],
                 message_type=event["message_type"], media_url=event["media_url"],
                 external_id=event["external_id"], contact_name=event["contact_name"],
+                sent_at=event.get("sent_at"),
             )
         elif kind == "manager":
             start_background(
@@ -327,6 +330,7 @@ async def telegram_webhook(request: Request):
         start_background(
             handle_client_message, bot, "telegram", chat_id, text,
             external_id=external_id, contact_name=contact_name,
+            sent_at=message.get("date"),
         )
         return {"status": "ok"}
 
